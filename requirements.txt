@@ -1,0 +1,4 @@
+# No external dependencies.
+# The node uses only the Python standard library (urllib, json, base64),
+# plus PIL / numpy / torch which are already provided by ComfyUI (only needed
+# when you connect the optional image input for vision models).
