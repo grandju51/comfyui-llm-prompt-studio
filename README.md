@@ -90,6 +90,13 @@ frequently return the *negative* prompt instead.
 
 `image_path` (optional) overrides the dropdown to read any file on disk.
 
+**`strip_lora_tags`** (on by default) removes network tags from both outputs —
+`<lora:Train_Entrance_SDXL-000027:1>`, `<lyco:…>`, `<hypernet:…>`, any weight
+including negative ones. The separators the removal orphans are cleaned up
+(`1girl, <lora:x:1>, solo` → `1girl, solo`), and a tag alone on its line takes
+the line with it instead of leaving a hole. Trigger words next to a tag are
+kept — only the tag itself goes. Turn it off to get the prompt verbatim.
+
 Tested on 4654 local images: **4635 prompts recovered (99.6%)**. The remainder
 genuinely contain none — screenshots, and `LoadImage → RemBg → SaveImage` style
 workflows with no sampler.

@@ -51,6 +51,14 @@ _COND_PASSTHROUGH_INPUTS = (
 _TEXT_INPUTS = ("text", "text_g", "text_l", "prompt", "string", "value",
                 "populated_text", "wildcard_text")
 
+# A1111-style network tags: <lora:name:1>, <lyco:name:0.8:0.5>, <hypernet:x:1>.
+# The weight part is free-form (several numbers, or none at all), so anything
+# that is not an angle bracket is accepted up to the closing '>'.
+_NETWORK_TAG = re.compile(
+    r"<\s*(?:lora|loras|lyco|lycoris|hypernet|hypernetwork)\s*:[^<>]*>",
+    re.IGNORECASE,
+)
+
 
 # --------------------------------------------------------------- raw metadata
 def read_raw_metadata(path: str) -> dict:
@@ -297,6 +305,35 @@ def parse_comfy_workflow(workflow_json: str):
     return pos, neg
 
 
+# --------------------------------------------------------------- LoRA stripping
+def remove_network_tags(text: str) -> str:
+    """Drop <lora:...> / <lyco:...> / <hypernet:...> tags from a prompt.
+
+    Removing a tag leaves punctuation behind ("1girl, <lora:x:1>, solo" would
+    become "1girl, , solo"), so the separators the removal orphaned are cleaned
+    up too. Formatting that had nothing to do with a tag is left alone.
+    """
+    if not text:
+        return text
+    if not _NETWORK_TAG.search(text):
+        return text
+
+    # A tag sitting alone on its line takes the whole line with it, otherwise
+    # the removal would leave a blank line behind. Done first and anchored to
+    # full lines, so paragraph breaks elsewhere in the prompt are preserved.
+    out = re.sub(
+        r"(?m)^[^\S\n]*(?:%s[^\S\n]*,?[^\S\n]*)+$\n?" % _NETWORK_TAG.pattern,
+        "", text, flags=re.IGNORECASE)
+
+    out = _NETWORK_TAG.sub("", out)                     # remaining inline tags
+    out = re.sub(r"[^\S\n]{2,}", " ", out)              # runs of spaces/tabs
+    out = re.sub(r",(?:[^\S\n]*,)+", ",", out)          # ", ,"      -> ","
+    out = re.sub(r"(?m)^[^\S\n]*,[^\S\n]*$", "", out)   # comma-only line
+    out = re.sub(r"(?m)^[^\S\n]*,[^\S\n]*", "", out)    # comma opening a line
+    out = re.sub(r"\n{3,}", "\n\n", out)                # blank-line pile-up
+    return out.strip().strip(",").strip()
+
+
 # ------------------------------------------------------------------ public API
 def extract_prompts(path: str):
     """Return (positive, negative, source_label, raw_metadata_text).
@@ -389,6 +426,11 @@ class CivitaiPromptLoader:
                     "tooltip": "Optional absolute path, overrides the dropdown. "
                                "Use it to read an image outside ComfyUI's input "
                                "folder."}),
+                "strip_lora_tags": ("BOOLEAN", {"default": True,
+                    "tooltip": "Remove LoRA/LyCORIS/hypernet tags from the "
+                               "outputs, e.g. <lora:Train_Entrance_SDXL:1>. "
+                               "The commas they leave behind are cleaned up "
+                               "too. Turn off to keep the prompt verbatim."}),
                 "on_failure": (["empty string", "error message"], {
                     "default": "empty string",
                     "tooltip": "What 'positive' returns when no prompt is found: "
@@ -405,7 +447,8 @@ class CivitaiPromptLoader:
         except Exception:
             return float("nan")
 
-    def load(self, image, image_path="", on_failure="empty string"):
+    def load(self, image, image_path="", strip_lora_tags=True,
+             on_failure="empty string"):
         import numpy as np
         import torch
         from PIL import Image, ImageOps
@@ -425,6 +468,15 @@ class CivitaiPromptLoader:
         except Exception as e:
             positive, negative, source, raw = "", "", "error: %s" % e, ""
             print("[CivitaiPromptLoader] metadata parse failed:", e)
+
+        if strip_lora_tags:
+            n_tags = len(_NETWORK_TAG.findall(positive)) + \
+                     len(_NETWORK_TAG.findall(negative))
+            if n_tags:
+                positive = remove_network_tags(positive)
+                negative = remove_network_tags(negative)
+                print("[CivitaiPromptLoader] stripped %d LoRA/network tag(s)"
+                      % n_tags)
 
         if positive:
             print("[CivitaiPromptLoader] prompt found via %s (%d chars)"
