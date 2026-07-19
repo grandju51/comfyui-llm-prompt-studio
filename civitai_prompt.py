@@ -59,6 +59,8 @@ _NETWORK_TAG = re.compile(
     re.IGNORECASE,
 )
 
+ON_FAILURE_MODES = ["empty string", "error message"]
+
 
 # --------------------------------------------------------------- raw metadata
 def read_raw_metadata(path: str) -> dict:
@@ -396,6 +398,25 @@ def _input_dir():
     return folder_paths.get_input_directory()
 
 
+def _resolve_image_path(image: str, image_path: str = "") -> str:
+    """Turn the widget value into a real path.
+
+    The upload button and clipspace hand over annotated names such as
+    'clipspace/x.png [input]', which only folder_paths knows how to resolve,
+    so that is tried first and plain joining is just the fallback.
+    """
+    if image_path and image_path.strip():
+        return os.path.expanduser(image_path.strip())
+    name = (image or "").strip()
+    if not name:
+        return ""
+    try:
+        import folder_paths
+        return folder_paths.get_annotated_filepath(name)
+    except Exception:
+        return os.path.join(_input_dir(), name)
+
+
 class CivitaiPromptLoader:
     """Load an image AND recover the prompt stored in its metadata."""
 
@@ -415,13 +436,14 @@ class CivitaiPromptLoader:
             )
         except Exception:
             files = []
+        # Everything lives in "required", the way ComfyUI's own LoadImageMask
+        # does it - widget values are serialized positionally, so a mix of
+        # required and optional widgets can shift them in saved workflows.
         return {
             "required": {
                 "image": (files, {"image_upload": True,
                     "tooltip": "Image to load. Its embedded metadata is parsed "
                                "to recover the prompt it was generated with."}),
-            },
-            "optional": {
                 "image_path": ("STRING", {"default": "",
                     "tooltip": "Optional absolute path, overrides the dropdown. "
                                "Use it to read an image outside ComfyUI's input "
@@ -431,16 +453,26 @@ class CivitaiPromptLoader:
                                "outputs, e.g. <lora:Train_Entrance_SDXL:1>. "
                                "The commas they leave behind are cleaned up "
                                "too. Turn off to keep the prompt verbatim."}),
-                "on_failure": (["empty string", "error message"], {
-                    "default": "empty string",
+                "on_failure": (ON_FAILURE_MODES, {
+                    "default": ON_FAILURE_MODES[0],
                     "tooltip": "What 'positive' returns when no prompt is found: "
                                "an empty string, or a short diagnostic message."}),
             },
         }
 
     @classmethod
+    def VALIDATE_INPUTS(cls, **kwargs):
+        """Accept whatever the graph sends and normalise it in load().
+
+        A workflow saved with an older version of this node has its widget
+        values shifted by one, which would otherwise abort the whole prompt
+        with 'Value not in list'. Degrading to defaults beats refusing to run.
+        """
+        return True
+
+    @classmethod
     def IS_CHANGED(cls, image, image_path="", **kwargs):
-        path = image_path.strip() or os.path.join(_input_dir(), image)
+        path = _resolve_image_path(image, image_path)
         try:
             st = os.stat(path)
             return "%s:%s" % (st.st_mtime_ns, st.st_size)
@@ -448,12 +480,25 @@ class CivitaiPromptLoader:
             return float("nan")
 
     def load(self, image, image_path="", strip_lora_tags=True,
-             on_failure="empty string"):
+             on_failure=None):
         import numpy as np
         import torch
         from PIL import Image, ImageOps
 
-        path = image_path.strip() or os.path.join(_input_dir(), image)
+        # VALIDATE_INPUTS lets anything through, so coerce here. Values can be
+        # off by one when an older workflow is reloaded; falling back to the
+        # defaults keeps the graph running instead of failing it.
+        if on_failure not in ON_FAILURE_MODES:
+            on_failure = ON_FAILURE_MODES[0]
+        if not isinstance(strip_lora_tags, bool):
+            strip_lora_tags = str(strip_lora_tags).strip().lower() in (
+                "true", "1", "yes", "on")
+        if not isinstance(image_path, str):
+            image_path = ""
+        if not isinstance(image, str):
+            image = ""
+
+        path = _resolve_image_path(image, image_path)
 
         if not os.path.isfile(path):
             msg = "[CivitaiPromptLoader] file not found: %s" % path
