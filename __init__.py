@@ -9,6 +9,10 @@ import json
 import urllib.error
 import urllib.request
 
+from .civitai_prompt import (
+    NODE_CLASS_MAPPINGS as _CIVITAI_CLASSES,
+    NODE_DISPLAY_NAME_MAPPINGS as _CIVITAI_NAMES,
+)
 from .nodes import (
     NODE_CLASS_MAPPINGS,
     NODE_DISPLAY_NAME_MAPPINGS,
@@ -16,6 +20,9 @@ from .nodes import (
     _pick_chat_model,
 )
 from .prompt_templates import TEMPLATES
+
+NODE_CLASS_MAPPINGS.update(_CIVITAI_CLASSES)
+NODE_DISPLAY_NAME_MAPPINGS.update(_CIVITAI_NAMES)
 
 # Tell ComfyUI where the front-end JS lives.
 WEB_DIRECTORY = "./web"

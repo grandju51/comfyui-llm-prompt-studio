@@ -61,6 +61,41 @@ Outputs:
 
 ---
 
+## Second node: `Load Image + Prompt (Civitai/A1111/ComfyUI)`
+
+Loads an image **and recovers the prompt it was generated with** from the
+metadata embedded in the file. Nothing is encrypted — it is plain text stored
+in fields image viewers simply don't display.
+
+Outputs: `image`, `mask`, `positive`, `negative`, `raw_metadata`.
+
+> **Why a loader and not an `IMAGE` input?** A ComfyUI `IMAGE` is a decoded
+> pixel tensor — all metadata is stripped the moment the file is loaded. The
+> prompt can only be read from the **file**, so this node opens it itself. It
+> is a drop-in replacement for `LoadImage` (same dropdown + upload button).
+
+Supported sources, tried most-explicit first:
+
+| # | Source | Where it lives |
+|---|--------|----------------|
+| 1 | **Civitai `extraMetadata`** | JSON blob with explicit `prompt` / `negativePrompt`, at the workflow root **or** under `extra` |
+| 2 | **A1111 / Civitai block** | PNG `parameters` chunk, or EXIF `UserComment` (0x9286, `UNICODE\0` + UTF-16) |
+| 3 | **ComfyUI API graph** | PNG `prompt` chunk, or JSON in EXIF |
+| 4 | **ComfyUI UI graph** | PNG `workflow` chunk (widget values, best-effort) |
+
+For ComfyUI graphs the positive prompt is found by **following the sampler's
+`positive` link** and walking through passthrough nodes (ControlNet,
+ConditioningCombine, primitives…). Grabbing "the first `CLIPTextEncode`" would
+frequently return the *negative* prompt instead.
+
+`image_path` (optional) overrides the dropdown to read any file on disk.
+
+Tested on 4654 local images: **4635 prompts recovered (99.6%)**. The remainder
+genuinely contain none — screenshots, and `LoadImage → RemBg → SaveImage` style
+workflows with no sampler.
+
+---
+
 ## Install
 
 1. Copy the **`comfyui-llm-prompt-studio`** folder into
