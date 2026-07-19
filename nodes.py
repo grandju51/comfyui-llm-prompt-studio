@@ -32,6 +32,20 @@ _HISTORY = {}
 
 THINKING_MODES = ["auto", "off (no thinking)", "on (force thinking)"]
 
+# Image downscaling presets for vision analysis.
+# Megapixel entries keep the aspect ratio and target a total pixel count;
+# pixel entries cap the LONGEST side. "original" sends the image untouched.
+IMAGE_SIZES = [
+    "original",
+    "2 MP",
+    "1.5 MP",
+    "1 MP",
+    "768 px",
+    "512 px",
+]
+_IMAGE_SIZE_MP = {"2 MP": 2.0, "1.5 MP": 1.5, "1 MP": 1.0}
+_IMAGE_SIZE_PX = {"768 px": 768, "512 px": 512}
+
 
 def _endpoint(base_url: str, path: str) -> str:
     return base_url.strip().rstrip("/") + path
@@ -109,8 +123,36 @@ def _ui_result(prompt_text: str, raw_text: str):
     return {"ui": {"text": [prompt_text]}, "result": (prompt_text, raw_text)}
 
 
-def _image_to_data_url(image_tensor) -> str:
-    """Convert a ComfyUI IMAGE tensor (B,H,W,C float 0..1) to a PNG data URL."""
+def _target_size(width: int, height: int, size_mode: str):
+    """Return the (w, h) the image should be resized to, or None to keep it.
+
+    Megapixel modes scale the image so w*h matches the target while keeping the
+    aspect ratio; pixel modes cap the longest side. Images already smaller than
+    the target are never upscaled.
+    """
+    if size_mode in _IMAGE_SIZE_MP:
+        target_px = _IMAGE_SIZE_MP[size_mode] * 1_000_000.0
+        current_px = float(width * height)
+        if current_px <= target_px:
+            return None
+        scale = (target_px / current_px) ** 0.5
+    elif size_mode in _IMAGE_SIZE_PX:
+        longest = max(width, height)
+        target = _IMAGE_SIZE_PX[size_mode]
+        if longest <= target:
+            return None
+        scale = target / float(longest)
+    else:  # "original" or anything unknown
+        return None
+    return max(1, int(round(width * scale))), max(1, int(round(height * scale)))
+
+
+def _image_to_data_url(image_tensor, size_mode: str = "original") -> str:
+    """Convert a ComfyUI IMAGE tensor (B,H,W,C float 0..1) to a PNG data URL.
+
+    ``size_mode`` optionally downscales the image before encoding, which cuts
+    the request size and the number of vision tokens the model has to chew on.
+    """
     import numpy as np
     from PIL import Image
 
@@ -119,6 +161,13 @@ def _image_to_data_url(image_tensor) -> str:
         else np.asarray(image_tensor[0])
     arr = (np.clip(img, 0.0, 1.0) * 255.0).round().astype("uint8")
     pil = Image.fromarray(arr)
+
+    new_size = _target_size(pil.width, pil.height, size_mode)
+    if new_size is not None:
+        print("[LLMPromptStudio] image %dx%d -> %dx%d (%s)"
+              % (pil.width, pil.height, new_size[0], new_size[1], size_mode))
+        pil = pil.resize(new_size, Image.LANCZOS)
+
     buf = io.BytesIO()
     pil.save(buf, format="PNG")
     b64 = base64.b64encode(buf.getvalue()).decode("ascii")
@@ -203,6 +252,10 @@ class LLMPromptStudio:
                 "temperature": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 2.0, "step": 0.01}),
                 "top_p": ("FLOAT", {"default": 0.9, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "top_k": ("INT", {"default": 40, "min": 0, "max": 1000}),
+                "min_p": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01,
+                    "tooltip": "Min-p sampling: drops tokens below this fraction of the "
+                               "top token's probability. 0 = disabled. Try 0.05-0.1 and "
+                               "raise top_p to 1.0 to use min_p alone."}),
                 "repeat_penalty": ("FLOAT", {"default": 1.1, "min": 0.0, "max": 2.0, "step": 0.01}),
                 "max_tokens": ("INT", {"default": 1024, "min": 16, "max": 32768}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff,
@@ -232,6 +285,14 @@ class LLMPromptStudio:
                     "tooltip": "Clear this node's memory before generating."}),
                 "timeout": ("INT", {"default": 120, "min": 5, "max": 1800,
                     "tooltip": "Request timeout in seconds."}),
+                # --- vision input ---
+                "image_analysis_size": (IMAGE_SIZES, {
+                    "default": "1 MP",
+                    "tooltip": "Downscale the connected image before sending it to the "
+                               "vision model. Smaller = faster and fewer vision tokens. "
+                               "MP presets keep the aspect ratio; px presets cap the "
+                               "longest side. Images already smaller are left as-is.",
+                }),
             },
             "optional": {
                 "api_key": ("STRING", {"default": "lm-studio",
@@ -250,9 +311,10 @@ class LLMPromptStudio:
 
     # ------------------------------------------------------------------ main
     def generate(self, base_url, model, target_model, global_directives,
-                 system_prompt, user_prompt, temperature, top_p, top_k,
+                 system_prompt, user_prompt, temperature, top_p, top_k, min_p,
                  repeat_penalty, max_tokens, seed, thinking, strip_before_tag,
                  keep_history, max_history_turns, reset_history, timeout,
+                 image_analysis_size="original",
                  api_key="", image=None, unique_id=None):
 
         # 1) resolve the system prompt (fallback to preset if empty), then add
@@ -279,7 +341,7 @@ class LLMPromptStudio:
         # 3) build the user message content (text, + image for vision models)
         if image is not None:
             try:
-                data_url = _image_to_data_url(image)
+                data_url = _image_to_data_url(image, image_analysis_size)
                 user_content = [
                     {"type": "text", "text": user_text},
                     {"type": "image_url", "image_url": {"url": data_url}},
@@ -311,6 +373,7 @@ class LLMPromptStudio:
             "temperature": float(temperature),
             "top_p": float(top_p),
             "top_k": int(top_k),
+            "min_p": float(min_p),
             "repetition_penalty": float(repeat_penalty),  # vLLM / many backends
             "repeat_penalty": float(repeat_penalty),       # LM Studio (llama.cpp)
             "max_tokens": int(max_tokens),

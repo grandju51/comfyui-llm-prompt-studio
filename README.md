@@ -27,8 +27,8 @@ generic preset.
 - **Target model dropdown** – pick the generator; its English preset auto-loads
   into `system_prompt` and stays **fully editable**. (Leave `system_prompt`
   empty to always use the current preset.)
-- **Sampling controls**: `temperature`, `top_p`, `top_k`, `repeat_penalty`,
-  `seed` (with `control_after_generate`).
+- **Sampling controls**: `temperature`, `top_p`, `top_k`, `min_p`,
+  `repeat_penalty`, `seed` (with `control_after_generate`).
 - **Output tokens**: `max_tokens` caps the length of the generated answer.
 - **Thinking control** (`auto` / `off` / `on`): tuned for **Qwen3.x** (sends
   `/no_think` + `enable_thinking=false`). Gemma has no thinking mode → use
@@ -44,6 +44,11 @@ generic preset.
   and `reset_history` to clear it.
 - **Optional image input**: connect an `IMAGE` to use a vision model
   (image → prompt / captioning).
+- **Image analysis size** (`image_analysis_size`): downscale the image before
+  it is sent — `original`, `2 MP`, `1.5 MP`, `1 MP`, `768 px`, `512 px`.
+  The `MP` presets keep the aspect ratio and target a total pixel count; the
+  `px` presets cap the longest side. Images already smaller than the target are
+  never upscaled.
 
 Outputs:
 - `prompt` – the cleaned text (after the cut tag, **no thinking**). It is a
@@ -101,6 +106,9 @@ vllm serve Qwen/Qwen3-8B --port 8000          # add --api-key YOURKEY if you wan
   `<think>…</think>` block, the `strip_before_tag = </think>` cleanup removes it
   from `prompt`. For models that use other reasoning tags, list them all
   comma-separated, e.g. `</think>,</thinking>,</reasoning>`.
+- **min_p** is sent as a top-level field (supported by LM Studio/llama.cpp and
+  vLLM; ignored by backends that don't know it). `0.0` disables it. A common
+  setup is `min_p = 0.05-0.1` with `top_p = 1.0` so min-p does the filtering.
 - **top_k / repeat_penalty** are sent as top-level fields. Both
   `repetition_penalty` (vLLM) and `repeat_penalty` (LM Studio/llama.cpp) are
   included so each backend uses the one it understands.
