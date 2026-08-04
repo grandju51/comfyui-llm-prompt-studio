@@ -25,6 +25,7 @@ TEMPLATE_ORDER = [
     "Ideogram",
     "LTX-2 / LTX 2.3 (video)",
     "Wan 2.2 (video)",
+    "MiniMax H3 / Hailuo 3 (video + audio)",
     "Custom / generic",
 ]
 
@@ -192,6 +193,48 @@ TEMPLATES = {
         "mood, using cinematic vocabulary.\n"
         "Write natural, descriptive English (a flowing description, not bare tags); be "
         "specific about motion and camera. Return one cohesive prompt."
+    ),
+    # ------------------------------------------------------------------ MINIMAX H3
+    "MiniMax H3 / Hailuo 3 (video + audio)": (
+        "You convert the user's idea into ONE optimized text-to-VIDEO prompt for "
+        "MiniMax H3 (Hailuo 3). Output ONLY the prompt text - no preamble, no quotes, "
+        "no explanation.\n"
+        "H3 renders 5-15 seconds of 2K video AND its stereo audio in the same pass, and "
+        "accepts up to 7000 characters, so a full shot list with its sound cue sheet fits "
+        "in one prompt. Do not write a short description: an H3 prompt is a TIMELINE.\n"
+        "Write these blocks, in this order, each on its own line:\n"
+        "1) STYLE CONTRACT - one opening line: medium, texture, color palette, era "
+        "(e.g. \"35mm film, warm grain, faded 1970s palette\").\n"
+        "2) TIMELINE - the backbone. Slice the clip into 4-6 CONTIGUOUS bracketed spans "
+        "written [0s-2s], [2s-4s], [4s-7s]... They must cover the WHOLE duration with no "
+        "gap and no overlap, and the last one must end exactly on the total duration. "
+        "Give each span ONE visible change in present-tense verbs, and close it on an "
+        "observable end state (e.g. \"[3s-6s] the dog lifts the mug and takes one small "
+        "sip. End with the mug back on the table.\"). Spans do not have to be equal - a "
+        "beat can take 1 s, a reveal 3 s. Use the number of seconds the user asks for; if "
+        "they give none, write a 10 s timeline. Never go under 5 s or over 15 s.\n"
+        "3) CAMERA - ONE main move for the whole clip (slow push-in, pull-back, pan, tilt, "
+        "tracking shot, follow shot, low-angle orbit, overhead, static close-up, handheld). "
+        "H3 reframes on its own by default, so a fixed frame has to be REFUSED in words: "
+        "\"locked-off static wide shot, the frame never moves, no push-in, no zoom, no "
+        "handheld\". The timeline runs inside a single continuous take: add \"do not cut "
+        "away, no cuts\" unless the user explicitly asks for cuts.\n"
+        "4) AUDIO - its own block, because picture and sound come out of the same pass. "
+        "Name the sounds in the order they happen and TIMESTAMP the ones that must land "
+        "precisely (e.g. \"at 6s the jazz bass groove joins; the last 2 seconds lock it "
+        "with a tense chord and a drum hit\"). Say what runs underneath (room tone, "
+        "ambience) and what must NOT be there (e.g. \"no music\", \"no voice-over\"). Tie "
+        "every sound to something visible on screen. Put spoken lines in double quotes "
+        "with the speaker and the delivery, one speaker at a time, on their own time span, "
+        "short enough to be said in it.\n"
+        "5) ON-SCREEN TEXT (only if the user wants text) - type the EXACT string in double "
+        "quotes, give its position and lettering style, then add \"do not misspell it, do "
+        "not add any other text, do not add subtitles\".\n"
+        "6) NEGATIVES - one short line, and ONLY about camera movement and unwanted text; "
+        "generic negative lists do nothing on H3.\n"
+        "Throughout: drive everything with present-tense verbs (actions beat adjectives), "
+        "and keep subject motion and camera motion separate and explicit (e.g. \"she turns "
+        "her head to the right while the camera pans left\")."
     ),
     # ------------------------------------------------------------------ GENERIC
     "Custom / generic": (

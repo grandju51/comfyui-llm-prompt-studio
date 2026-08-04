@@ -8,9 +8,11 @@ Features
 - OpenAI-compatible /chat/completions (works with LM Studio and vLLM).
 - Two text boxes: a system prompt ("LLM card") and a chat/user message.
 - Target-model dropdown with editable, pre-filled English prompt templates
-  (Anima, Illustrious, SDXL, FLUX.2 Klein, FLUX Krea, Ideogram, LTX, Wan...).
+  (Anima, Illustrious, SDXL, FLUX.2 Klein, FLUX Krea, Ideogram, LTX, Wan,
+  MiniMax H3...).
 - Sampling controls: temperature, top_p, top_k, repeat penalty, max tokens, seed.
-- Thinking control (auto / off / on) tuned for Qwen3.x; Gemma-safe.
+- Thinking control (auto / off / on) tuned for Qwen3.x; Gemma-safe, with a real
+  "no think" for DeepSeek-style servers (non-thinking alias + explicit flags).
 - Custom "cut tag": everything up to AND including the tag is removed from the
   output (great for stripping a model's </think> reasoning block).
 - Optional conversation memory (multi-turn) with a reset toggle.
@@ -31,6 +33,28 @@ from .prompt_templates import TEMPLATE_ORDER, get_template
 _HISTORY = {}
 
 THINKING_MODES = ["auto", "off (no thinking)", "on (force thinking)"]
+
+# --- "no think" -------------------------------------------------------------
+# A request that says nothing about reasoning is NOT neutral: DeepSeek-style
+# servers read the absence of the field as "thinking ON". Turning it off has to
+# be stated, and each backend listens to a different lever, so "off" sends them
+# all at once:
+#   - the non-thinking model alias (deepseek-chat is the twin of the reasoner);
+#   - chat_template_kwargs, whose spelling differs per model family;
+#   - the Anthropic-style thinking block, for DeepSeek-compatible proxies.
+_DEEPSEEK_NO_THINK_ALIAS = "deepseek-chat"
+
+# chat template switches, sent together: a template only reads the name it knows
+# and ignores the other, so both families are covered by one request.
+_TEMPLATE_THINK_KWARGS = {
+    False: {"enable_thinking": False, "thinking": False},
+    True: {"enable_thinking": True, "thinking": True},
+}
+
+
+def _looks_deepseek(model: str) -> bool:
+    return "deepseek" in (model or "").lower()
+
 
 # Image downscaling presets for vision analysis.
 # Megapixel entries keep the aspect ratio and target a total pixel count;
@@ -116,6 +140,34 @@ def _resolve_model(base_url: str, api_key: str, model: str, timeout: int):
     except Exception as e:
         print("[coco] auto model detection failed:", e)
     return m if m and m.lower() not in _AUTO_MODEL else "local-model"
+
+
+def _no_think_model(base_url: str, api_key: str, model: str, override: str,
+                    timeout: int) -> str:
+    """Return the model to call when thinking is off.
+
+    ``override`` (the no_think_model widget) always wins. Otherwise a DeepSeek
+    model is switched to its non-thinking twin - but ONLY if the server really
+    serves that alias: a local GGUF loaded as "deepseek-v3.2" has no such name
+    and renaming it blindly would turn every run into a 404.
+    """
+    override = (override or "").strip()
+    if override:
+        return override
+    if not _looks_deepseek(model) or model.strip().lower() == _DEEPSEEK_NO_THINK_ALIAS:
+        return model
+    try:
+        served = {str(m).strip().lower()
+                  for m in _list_models(base_url, api_key, min(timeout, 15))}
+    except Exception as e:
+        print("[LLMPromptStudio] no-think alias lookup failed:", e)
+        return model
+    if _DEEPSEEK_NO_THINK_ALIAS in served:
+        print("[LLMPromptStudio] no think: %s -> %s" % (model, _DEEPSEEK_NO_THINK_ALIAS))
+        return _DEEPSEEK_NO_THINK_ALIAS
+    print("[LLMPromptStudio] no think: %s has no '%s' alias, using flags only"
+          % (base_url, _DEEPSEEK_NO_THINK_ALIAS))
+    return model
 
 
 def _ui_result(prompt_text: str, raw_text: str):
@@ -263,13 +315,14 @@ class LLMPromptStudio:
                 # --- thinking / reasoning ---
                 "thinking": (THINKING_MODES, {
                     "default": "off (no thinking)",
-                    "tooltip": "Reasoning control. 'off' best for Qwen3.x (sends "
-                               "/no_think + enable_thinking=false). Gemma has no "
-                               "thinking mode; use auto/off.",
+                    "tooltip": "Reasoning control. 'off' sends every dialect at "
+                               "once: /no_think (Qwen3.x), enable_thinking/thinking "
+                               "= false, and the non-thinking model alias for "
+                               "DeepSeek. Gemma has no thinking mode; use auto/off.",
                 }),
                 # --- output cleanup ---
                 "strip_before_tag": ("STRING", {
-                    "default": "</think>",
+                    "default": "</think>,</mm:think>",
                     "tooltip": "Everything up to AND including the tag is removed from "
                                "the output. Put SEVERAL tags separated by commas "
                                "(e.g. </think>,</thinking>,</reasoning>); the comma is "
@@ -300,6 +353,15 @@ class LLMPromptStudio:
                                "--api-key). Leave default if none."}),
                 "image": ("IMAGE", {"tooltip": "Optional image for vision models "
                                                "(image -> prompt)."}),
+                # Kept LAST: widget values are serialized positionally, so a new
+                # widget anywhere else would shift saved workflows by one slot.
+                "no_think_model": ("STRING", {"default": "",
+                    "tooltip": "No-think override: the model alias called INSTEAD "
+                               "when thinking = off. DeepSeek-style servers read a "
+                               "request with no thinking field as thinking ON, so "
+                               "naming the non-thinking alias is what really turns "
+                               "reasoning off. Empty = auto (a DeepSeek model "
+                               "becomes 'deepseek-chat' if the server serves it)."}),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
@@ -315,7 +377,7 @@ class LLMPromptStudio:
                  repeat_penalty, max_tokens, seed, thinking, strip_before_tag,
                  keep_history, max_history_turns, reset_history, timeout,
                  image_analysis_size="original",
-                 api_key="", image=None, unique_id=None):
+                 api_key="", image=None, no_think_model="", unique_id=None):
 
         # 1) resolve the system prompt (fallback to preset if empty), then add
         #    the user's global directives so they apply to every target model.
@@ -328,15 +390,30 @@ class LLMPromptStudio:
                 + "above]\n" + gd
             )
 
-        # 2) thinking control (Qwen3.x convention; harmless/ignored elsewhere)
+        # 2) thinking control. The model is resolved FIRST because "off" may have
+        #    to call a different one: on DeepSeek-style servers the reasoning mode
+        #    is chosen by the alias, and a request that stays silent means ON.
+        resolved_model = _resolve_model(base_url, api_key, model, timeout)
         user_text = user_prompt
         extra_template_kwargs = None
+        extra_payload = {}
         if thinking.startswith("off"):
-            user_text = user_text.rstrip() + " /no_think"
-            extra_template_kwargs = {"enable_thinking": False}
+            resolved_model = _no_think_model(base_url, api_key, resolved_model,
+                                             no_think_model, timeout)
+            extra_template_kwargs = dict(_TEMPLATE_THINK_KWARGS[False])
+            if _looks_deepseek(resolved_model) or (no_think_model or "").strip():
+                # /no_think is a Qwen3 chat-template trigger; DeepSeek has no such
+                # rule and would read it as part of the idea. Its proxies take the
+                # Anthropic-style block instead.
+                extra_payload["thinking"] = {"type": "disabled"}
+            else:
+                user_text = user_text.rstrip() + " /no_think"
         elif thinking.startswith("on"):
-            user_text = user_text.rstrip() + " /think"
-            extra_template_kwargs = {"enable_thinking": True}
+            extra_template_kwargs = dict(_TEMPLATE_THINK_KWARGS[True])
+            if _looks_deepseek(resolved_model):
+                extra_payload["thinking"] = {"type": "enabled"}
+            else:
+                user_text = user_text.rstrip() + " /think"
 
         # 3) build the user message content (text, + image for vision models)
         if image is not None:
@@ -366,7 +443,6 @@ class LLMPromptStudio:
 
         # 5) build the request payload (top-level extras work for LM Studio + vLLM;
         #    both penalty spellings are sent so each backend picks the one it knows)
-        resolved_model = _resolve_model(base_url, api_key, model, timeout)
         payload = {
             "model": resolved_model,
             "messages": messages,
@@ -381,8 +457,12 @@ class LLMPromptStudio:
             "stream": False,
         }
         if extra_template_kwargs is not None:
-            # vLLM passes this through to the chat template (Qwen3 enable_thinking)
+            # vLLM/SGLang pass this through to the chat template: enable_thinking
+            # for Qwen3.x and GLM, thinking for DeepSeek V3.1+. A template simply
+            # ignores the name it does not use.
             payload["chat_template_kwargs"] = extra_template_kwargs
+        # top-level reasoning switch for DeepSeek-compatible servers and proxies
+        payload.update(extra_payload)
 
         url = _endpoint(base_url, "/chat/completions")
 

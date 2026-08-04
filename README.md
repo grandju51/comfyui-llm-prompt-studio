@@ -6,8 +6,8 @@ specific image / video generator**.
 
 It ships with editable, ready-to-use prompt "cards" for:
 **Anima base v1**, **Illustrious**, **SDXL**, **FLUX.2 Klein (9B)**,
-**Krea 2 (Krea AI)**, **Ideogram**, **LTX-2 / LTX 2.3**, **Wan 2.2**, plus a
-generic preset.
+**Krea 2 (Krea AI)**, **Ideogram**, **LTX-2 / LTX 2.3**, **Wan 2.2**,
+**MiniMax H3 / Hailuo 3**, plus a generic preset.
 
 ---
 
@@ -30,12 +30,17 @@ generic preset.
 - **Sampling controls**: `temperature`, `top_p`, `top_k`, `min_p`,
   `repeat_penalty`, `seed` (with `control_after_generate`).
 - **Output tokens**: `max_tokens` caps the length of the generated answer.
-- **Thinking control** (`auto` / `off` / `on`): tuned for **Qwen3.x** (sends
-  `/no_think` + `enable_thinking=false`). Gemma has no thinking mode → use
-  `auto`/`off`.
+- **Thinking control** (`auto` / `off` / `on`): `off` states "no thinking" in
+  every dialect at once — `/no_think` + `enable_thinking=false` (**Qwen3.x**,
+  GLM), `thinking=false` (**DeepSeek V3.1+** on vLLM/SGLang), and the
+  **non-thinking model alias** for DeepSeek. Gemma has no thinking mode → use
+  `auto`/`off`. See [Real "no think" (DeepSeek & co)](#real-no-think-deepseek--co).
+- **`no_think_model`** (optional): the model alias called **instead** when
+  thinking is `off`. Empty = auto.
 - **Custom cut tag(s)** (`strip_before_tag`): everything **up to and including**
-  the tag is removed from the output. Default `</think>` strips a model's
-  reasoning block. You can list **several tags separated by commas**
+  the tag is removed from the output. Default `</think>,</mm:think>` strips a
+  model's reasoning block (the second one is MiniMax M3's tag). You can list
+  **several tags separated by commas**
   (e.g. `</think>,</thinking>,</reasoning>`) — the comma is only a separator,
   and whichever tag ends furthest into the text is used as the cut point. This
   is the robust safety net for hiding thinking.
@@ -145,8 +150,8 @@ vllm serve Qwen/Qwen3-8B --port 8000          # add --api-key YOURKEY if you wan
 
 - **Thinking / Qwen3.x**: with `thinking = off`, the node appends `/no_think`
   and asks vLLM to disable the reasoning template. Even if a model still emits a
-  `<think>…</think>` block, the `strip_before_tag = </think>` cleanup removes it
-  from `prompt`. For models that use other reasoning tags, list them all
+  `<think>…</think>` block, the `strip_before_tag` cleanup removes it from
+  `prompt`. For models that use other reasoning tags, list them all
   comma-separated, e.g. `</think>,</thinking>,</reasoning>`.
 - **min_p** is sent as a top-level field (supported by LM Studio/llama.cpp and
   vLLM; ignored by backends that don't know it). `0.0` disables it. A common
@@ -167,6 +172,47 @@ vllm serve Qwen/Qwen3-8B --port 8000          # add --api-key YOURKEY if you wan
 
 ---
 
+## Real "no think" (DeepSeek & co)
+
+A request that says nothing about reasoning is **not** neutral. DeepSeek-style
+servers (the official API, `ds4`, and most local re-implementations) read the
+**absence** of the thinking field as *thinking ON* — so "just don't ask for it"
+silently gives you a reasoning model. Worse: in thinking mode these backends
+**ignore your sampling settings**, which is exactly what you don't want for
+prompt writing.
+
+`thinking = off` therefore states it in every dialect at once:
+
+| Lever | Sent as | Understood by |
+|-------|---------|---------------|
+| Non-thinking **model alias** | `model: "deepseek-chat"` | DeepSeek API / ds4 — **the one that always wins** |
+| Chat-template switch | `chat_template_kwargs: {enable_thinking: false, thinking: false}` | Qwen3.x, GLM (`enable_thinking`) · DeepSeek V3.1+ on vLLM/SGLang (`thinking`) |
+| Reasoning block | `thinking: {"type": "disabled"}` | DeepSeek-compatible proxies |
+| Prompt trigger | ` /no_think` appended to your idea | Qwen3.x chat template |
+
+The alias swap is **automatic and safe**: a DeepSeek model is switched to
+`deepseek-chat` **only if the server actually serves that name** (checked via
+`/models`). A local GGUF loaded as `deepseek-v3.2-exp` keeps its name and gets
+the flags only — no renaming, no 404. What happened is printed in the console:
+
+```
+[LLMPromptStudio] no think: deepseek-reasoner -> deepseek-chat
+```
+
+The ` /no_think` trigger is **not** appended for DeepSeek — it is a Qwen chat
+template rule, and DeepSeek would simply read it as part of your idea.
+
+**`no_think_model`** (optional, last widget) overrides all of it: type the exact
+alias your server exposes (e.g. `deepseek-chat`, `my-chat-alias`) and it is
+called whenever thinking is `off`. It also forces the DeepSeek behaviour for
+servers whose model names don't contain "deepseek".
+
+> For **code** work outside ComfyUI, keeping thinking on is usually better — the
+> reason to kill it is sampling control, which only matters for writing. Two
+> profiles, two configs.
+
+---
+
 ## How prompts were tuned (sources)
 
 - Anima base v1 — CircleStone Labs / Comfy Org docs & Civitai (hybrid tags +
@@ -182,6 +228,19 @@ vllm serve Qwen/Qwen3-8B --port 8000          # add --api-key YOURKEY if you wan
 - LTX-2 / LTX 2.3 — Lightricks LTX prompting guide (4–8 sentences,
   subject→action→camera→lighting, motion verbs).
 - Wan 2.2 — Wan prompting guides (subject→motion→camera→scene, front-loaded).
+- MiniMax H3 / Hailuo 3 — fal / PixelDojo / AtlasCloud guides and the
+  reverse-engineered set of official prompts. **An H3 prompt is a timeline, not a
+  description**: style contract → **4–6 contiguous `[0s-2s]` / `[2s-4s]` spans**
+  covering the whole duration with no gap, each closing on an observable end
+  state → camera → **audio** (picture and stereo sound come out of the same pass,
+  so cues carry their own timecodes: *"at 6s the jazz bass groove joins"*) →
+  on-screen text → negatives. 5–15 s of 2K, 7000 characters allowed — a full shot
+  list with its sound cue sheet fits in one request. A locked-off frame has to be
+  **refused in words** (H3 reframes on its own), and negatives only bite on camera
+  moves and unwanted text.
+
+  > The card writes a **10 s** timeline by default. Ask for another length in
+  > `user_prompt` ("8 seconds…") or pin it once in `global_directives`.
 
 > **Krea 2** here is Krea AI's own foundation image model (not the BFL "FLUX
 > Krea" collaboration). **Klein 9b** is read as FLUX.2 [klein] 9B. If you meant
