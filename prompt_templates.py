@@ -16,6 +16,8 @@ Prompting guidance distilled from each model's documentation / community guides
 """
 
 # Order here = order of the dropdown. First entry is the default selection.
+# Never put a "/" in a name: ComfyUI reads it as a path separator and splits the
+# entry into nested submenus, so "A / B" shows up as "A >" with "B" hidden inside.
 TEMPLATE_ORDER = [
     "Anima base v1",
     "Illustrious",
@@ -23,11 +25,11 @@ TEMPLATE_ORDER = [
     "FLUX.2 Klein (9B)",
     "Krea 2 (Krea AI)",
     "Ideogram",
-    "LTX-2 / LTX 2.3 (video)",
+    "LTX-2 (LTX 2.3, video)",
     "Wan 2.2 (video)",
-    "MiniMax H3 - normal (T2VA / I2VA / FL2VA / L2VA)",
+    "MiniMax H3 - normal (T2VA, I2VA, FL2VA, L2VA)",
     "MiniMax H3 - ref (full-reference)",
-    "Custom / generic",
+    "Custom (generic)",
 ]
 
 TEMPLATES = {
@@ -160,7 +162,7 @@ TEMPLATES = {
         "toggles, settings, or commentary."
     ),
     # ------------------------------------------------------------------ LTX VIDEO
-    "LTX-2 / LTX 2.3 (video)": (
+    "LTX-2 (LTX 2.3, video)": (
         "You convert the user's idea into ONE optimized text-to-VIDEO prompt for LTX-2 "
         "(LTX 2.3). Output ONLY the prompt text - no preamble, no quotes, no "
         "explanation.\n"
@@ -196,7 +198,7 @@ TEMPLATES = {
         "specific about motion and camera. Return one cohesive prompt."
     ),
     # --------------------------------------------------------- MINIMAX H3 (NORMAL)
-    "MiniMax H3 - normal (T2VA / I2VA / FL2VA / L2VA)": (
+    "MiniMax H3 - normal (T2VA, I2VA, FL2VA, L2VA)": (
         "You convert the user's idea into ONE optimized prompt for MiniMax H3 "
         "(Hailuo 3), written in H3's OFFICIAL rewrite format. Output ONLY the prompt - "
         "no preamble, no explanation, no markdown fence.\n"
@@ -349,7 +351,7 @@ TEMPLATES = {
         "verbatim and untranslated."
     ),
     # ------------------------------------------------------------------ GENERIC
-    "Custom / generic": (
+    "Custom (generic)": (
         "You are an expert prompt engineer for AI image and video generators. Convert "
         "the user's idea into ONE optimized, vivid prompt in English. Output ONLY the "
         "final prompt - no preamble, no quotes, no explanation. Describe subject, "
@@ -358,6 +360,20 @@ TEMPLATES = {
 }
 
 
+# Names that used to be in the dropdown. A workflow saved with one of them still
+# finds its card instead of silently falling back to the generic one.
+LEGACY_NAMES = {
+    "LTX-2 / LTX 2.3 (video)": "LTX-2 (LTX 2.3, video)",
+    "Custom / generic": "Custom (generic)",
+    "MiniMax H3 - normal (T2VA / I2VA / FL2VA / L2VA)":
+        "MiniMax H3 - normal (T2VA, I2VA, FL2VA, L2VA)",
+    "MiniMax H3 (timeline)": "MiniMax H3 - normal (T2VA, I2VA, FL2VA, L2VA)",
+    "MiniMax H3 (no timeline)": "MiniMax H3 - normal (T2VA, I2VA, FL2VA, L2VA)",
+    "MiniMax H3 / Hailuo 3 (video)": "MiniMax H3 - normal (T2VA, I2VA, FL2VA, L2VA)",
+}
+
+
 def get_template(name: str) -> str:
     """Return the template for a target model name, falling back to generic."""
-    return TEMPLATES.get(name, TEMPLATES["Custom / generic"])
+    name = LEGACY_NAMES.get(name, name)
+    return TEMPLATES.get(name, TEMPLATES["Custom (generic)"])

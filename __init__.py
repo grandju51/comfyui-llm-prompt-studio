@@ -19,7 +19,7 @@ from .nodes import (
     _list_models,
     _pick_chat_model,
 )
-from .prompt_templates import TEMPLATES
+from .prompt_templates import TEMPLATES, LEGACY_NAMES
 
 NODE_CLASS_MAPPINGS.update(_CIVITAI_CLASSES)
 NODE_DISPLAY_NAME_MAPPINGS.update(_CIVITAI_NAMES)
@@ -56,7 +56,13 @@ try:
 
     @routes.get("/llm_prompt_studio/templates")
     async def _route_templates(request):
-        return web.json_response(TEMPLATES)
+        # Renamed cards are served under their old name too, so a workflow saved
+        # before the rename still finds its preset. The dropdown is built from
+        # TEMPLATE_ORDER, so these aliases never show up as extra entries.
+        payload = dict(TEMPLATES)
+        payload.update({old: TEMPLATES[new] for old, new in LEGACY_NAMES.items()
+                        if new in TEMPLATES})
+        return web.json_response(payload)
 
     print("[LLM Prompt Studio] routes registered.")
 
