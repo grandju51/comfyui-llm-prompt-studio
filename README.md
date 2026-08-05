@@ -7,7 +7,8 @@ specific image / video generator**.
 It ships with editable, ready-to-use prompt "cards" for:
 **Anima base v1**, **Illustrious**, **SDXL**, **FLUX.2 Klein (9B)**,
 **Krea 2 (Krea AI)**, **Ideogram**, **LTX-2 / LTX 2.3**, **Wan 2.2**,
-**MiniMax H3 / Hailuo 3**, plus a generic preset.
+**MiniMax H3 / Hailuo 3** (two cards: *timeline* and *no timeline*), plus a
+generic preset.
 
 ---
 
@@ -229,18 +230,23 @@ servers whose model names don't contain "deepseek".
   subject→action→camera→lighting, motion verbs).
 - Wan 2.2 — Wan prompting guides (subject→motion→camera→scene, front-loaded).
 - MiniMax H3 / Hailuo 3 — fal / PixelDojo / AtlasCloud guides and the
-  reverse-engineered set of official prompts. **An H3 prompt is a timeline, not a
-  description**: style contract → **4–6 contiguous `[0s-2s]` / `[2s-4s]` spans**
-  covering the whole duration with no gap, each closing on an observable end
-  state → camera → **audio** (picture and stereo sound come out of the same pass,
-  so cues carry their own timecodes: *"at 6s the jazz bass groove joins"*) →
-  on-screen text → negatives. 5–15 s of 2K, 7000 characters allowed — a full shot
-  list with its sound cue sheet fits in one request. A locked-off frame has to be
-  **refused in words** (H3 reframes on its own), and negatives only bite on camera
-  moves and unwanted text.
+  reverse-engineered set of official prompts. Both cards share what makes H3
+  specific: 5–15 s of 2K with **native stereo audio out of the same pass** (so
+  sound is directed in the prompt, tied to what is visible), a locked-off frame
+  that has to be **refused in words** (H3 reframes on its own), exact strings for
+  on-screen text, and negatives that only bite on camera moves and unwanted text.
+  The sources disagree on timing, so the two readings ship side by side:
 
-  > The card writes a **10 s** timeline by default. Ask for another length in
-  > `user_prompt` ("8 seconds…") or pin it once in `global_directives`.
+  | Card | What it writes | Use it for |
+  |------|----------------|------------|
+  | **timeline** | style contract → **4–6 contiguous `[0s-2s]` / `[2s-4s]` spans** covering the whole duration with no gap, each closing on an observable end state → camera → audio **with its own timecodes** (*"at 6s the jazz bass groove joins"*) → text → negatives | multi-beat shots, precise reveals, sound design. This is how the strongest official prompts are built |
+  | **no timeline** | one continuous paragraph, no time codes, built on **a single visible change and a destination** (*"the ice cube melts until only a wet ring is left"*) | single-action shots, and image-to-video where the reference image already does the describing |
+
+  H3 accepts 7000 characters, so even a full shot list with its sound cue sheet
+  fits in one request.
+
+  > The timeline card writes a **10 s** clip by default. Ask for another length
+  > in `user_prompt` ("8 seconds…") or pin it once in `global_directives`.
 
 > **Krea 2** here is Krea AI's own foundation image model (not the BFL "FLUX
 > Krea" collaboration). **Klein 9b** is read as FLUX.2 [klein] 9B. If you meant

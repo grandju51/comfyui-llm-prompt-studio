@@ -25,7 +25,8 @@ TEMPLATE_ORDER = [
     "Ideogram",
     "LTX-2 / LTX 2.3 (video)",
     "Wan 2.2 (video)",
-    "MiniMax H3 / Hailuo 3 (video + audio)",
+    "MiniMax H3 / Hailuo 3 (timeline)",
+    "MiniMax H3 / Hailuo 3 (no timeline)",
     "Custom / generic",
 ]
 
@@ -194,8 +195,8 @@ TEMPLATES = {
         "Write natural, descriptive English (a flowing description, not bare tags); be "
         "specific about motion and camera. Return one cohesive prompt."
     ),
-    # ------------------------------------------------------------------ MINIMAX H3
-    "MiniMax H3 / Hailuo 3 (video + audio)": (
+    # ------------------------------------------------------- MINIMAX H3 (TIMELINE)
+    "MiniMax H3 / Hailuo 3 (timeline)": (
         "You convert the user's idea into ONE optimized text-to-VIDEO prompt for "
         "MiniMax H3 (Hailuo 3). Output ONLY the prompt text - no preamble, no quotes, "
         "no explanation.\n"
@@ -235,6 +236,40 @@ TEMPLATES = {
         "Throughout: drive everything with present-tense verbs (actions beat adjectives), "
         "and keep subject motion and camera motion separate and explicit (e.g. \"she turns "
         "her head to the right while the camera pans left\")."
+    ),
+    # ---------------------------------------------------- MINIMAX H3 (NO TIMELINE)
+    "MiniMax H3 / Hailuo 3 (no timeline)": (
+        "You convert the user's idea into ONE optimized text-to-VIDEO prompt for "
+        "MiniMax H3 (Hailuo 3). Output ONLY the prompt text - no preamble, no quotes, "
+        "no explanation.\n"
+        "H3 renders 5-15 seconds of 2K video AND its stereo audio in the same pass, so "
+        "the prompt directs picture and sound together.\n"
+        "Do NOT use bracketed time codes here: write one continuous description, ordered "
+        "1) subject, 2) action, 3) scene and environment, 4) visual style (medium, "
+        "texture, color palette, era), 5) camera, 6) audio.\n"
+        "Without timestamps, what H3 needs instead is a VISIBLE CHANGE and a destination: "
+        "say what is different at the end of the clip and let the shot travel there (e.g. "
+        "\"the ice cube melts until only a wet ring is left on the wood\"). One clear "
+        "progression, not a list of moods.\n"
+        "Drive everything with present-tense verbs: actions beat adjectives.\n"
+        "Keep subject motion and camera motion separate and explicit (e.g. \"she turns "
+        "her head to the right while the camera pans left\").\n"
+        "Camera: name ONE main move - slow push-in, pull-back, pan, tilt, tracking shot, "
+        "follow shot, low-angle orbit, overhead, static close-up, handheld. H3 reframes on "
+        "its own by default, so a fixed frame has to be REFUSED in words: \"the frame "
+        "never moves, no push-in, no zoom, no handheld\".\n"
+        "Audio: finish with a line starting exactly with \"Audio:\" that names the sounds in "
+        "the order they happen, says what runs underneath (room tone, ambience) and what "
+        "must not be there (e.g. \"no music\"). Tie every sound to something visible on "
+        "screen. Put spoken lines in double quotes with the speaker and the delivery, one "
+        "speaker at a time, short enough to fit the clip.\n"
+        "On-screen text: type the EXACT string in double quotes, give its position and "
+        "lettering style, then add \"do not misspell it, do not add any other text, do not "
+        "add subtitles\".\n"
+        "Negative phrasing only works for camera movement and unwanted text - never append "
+        "a generic negative list.\n"
+        "Stay concise: this card is for single-action shots and for image-to-video, where "
+        "the reference image already does the describing. Return one cohesive paragraph."
     ),
     # ------------------------------------------------------------------ GENERIC
     "Custom / generic": (
