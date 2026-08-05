@@ -16,7 +16,8 @@ Features
 - Custom "cut tag": everything up to AND including the tag is removed from the
   output (great for stripping a model's </think> reasoning block).
 - Optional conversation memory (multi-turn) with a reset toggle.
-- Optional image input for vision models (image -> prompt / captioning).
+- Up to 8 image inputs for vision models, announced to the LLM as <Picture 1>,
+  <Picture 2>... in input order - the reference labels MiniMax H3 itself uses.
 """
 
 import base64
@@ -55,6 +56,11 @@ _TEMPLATE_THINK_KWARGS = {
 def _looks_deepseek(model: str) -> bool:
     return "deepseek" in (model or "").lower()
 
+
+# How many images the node can take. Each connected socket becomes one picture,
+# announced to the LLM as <Picture N> following the socket order - the reference
+# label MiniMax H3 uses in its own prompt format.
+MAX_PICTURES = 8
 
 # Image downscaling presets for vision analysis.
 # Megapixel entries keep the aspect ratio and target a total pixel count;
@@ -226,6 +232,28 @@ def _image_to_data_url(image_tensor, size_mode: str = "original") -> str:
     return "data:image/png;base64," + b64
 
 
+def _collect_pictures(images, size_mode: str):
+    """Data-URL every connected image, following the socket order.
+
+    The position in the returned list is what the LLM is told the picture is:
+    entry 0 is announced as <Picture 1>. Empty sockets are skipped rather than
+    counted, so leaving a hole in the middle (image + image_3) still produces
+    consecutive labels instead of a gap in the numbering.
+    """
+    urls = []
+    for slot, tensor in enumerate(images, 1):
+        if tensor is None:
+            continue
+        try:
+            if len(tensor) > 1:
+                print("[LLMPromptStudio] image slot %d carries a batch of %d, "
+                      "sending its first image" % (slot, len(tensor)))
+            urls.append(_image_to_data_url(tensor, size_mode))
+        except Exception as e:
+            print("[LLMPromptStudio] image slot %d could not be encoded: %s" % (slot, e))
+    return urls
+
+
 def _strip_before_tags(text: str, tags_csv: str) -> str:
     """Remove everything up to AND including the LATEST-occurring of the tags.
 
@@ -257,7 +285,7 @@ class LLMPromptStudio:
 
     @classmethod
     def INPUT_TYPES(cls):
-        return {
+        spec = {
             "required": {
                 # --- connection ---
                 "base_url": ("STRING", {
@@ -351,20 +379,31 @@ class LLMPromptStudio:
                 "api_key": ("STRING", {"default": "lm-studio",
                     "tooltip": "API key if required (LM Studio: any value; vLLM: your "
                                "--api-key). Leave default if none."}),
-                "image": ("IMAGE", {"tooltip": "Optional image for vision models "
-                                               "(image -> prompt)."}),
-                # Kept LAST: widget values are serialized positionally, so a new
-                # widget anywhere else would shift saved workflows by one slot.
-                "no_think_model": ("STRING", {"default": "",
-                    "tooltip": "No-think override: the model alias called INSTEAD "
-                               "when thinking = off. DeepSeek-style servers read a "
-                               "request with no thinking field as thinking ON, so "
-                               "naming the non-thinking alias is what really turns "
-                               "reasoning off. Empty = auto (a DeepSeek model "
-                               "becomes 'deepseek-chat' if the server serves it)."}),
+                "image": ("IMAGE", {"tooltip": "Optional image for vision models. The "
+                                               "LLM is told this one is <Picture 1>."}),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
+
+        # Extra picture sockets, added after the literal so the block above keeps
+        # its shape. They are inputs, not widgets, so they never appear in
+        # widgets_values and cannot shift a saved workflow.
+        optional = spec["optional"]
+        for i in range(2, MAX_PICTURES + 1):
+            optional["image_%d" % i] = ("IMAGE", {
+                "tooltip": "Extra reference image. Connected images are numbered in "
+                           "socket order, so this one reaches the LLM as <Picture %d> "
+                           "when every socket above it is used too." % i})
+        # Kept LAST: widget values are serialized positionally, so a new widget
+        # anywhere else would shift saved workflows by one slot.
+        optional["no_think_model"] = ("STRING", {"default": "",
+            "tooltip": "No-think override: the model alias called INSTEAD when "
+                       "thinking = off. DeepSeek-style servers read a request with "
+                       "no thinking field as thinking ON, so naming the non-thinking "
+                       "alias is what really turns reasoning off. Empty = auto (a "
+                       "DeepSeek model becomes 'deepseek-chat' if the server serves "
+                       "it)."})
+        return spec
 
     # Always re-run when the seed changes (control_after_generate); fixed seed = cached.
     @classmethod
@@ -377,7 +416,8 @@ class LLMPromptStudio:
                  repeat_penalty, max_tokens, seed, thinking, strip_before_tag,
                  keep_history, max_history_turns, reset_history, timeout,
                  image_analysis_size="original",
-                 api_key="", image=None, no_think_model="", unique_id=None):
+                 api_key="", image=None, no_think_model="", unique_id=None,
+                 **pictures):
 
         # 1) resolve the system prompt (fallback to preset if empty), then add
         #    the user's global directives so they apply to every target model.
@@ -415,17 +455,19 @@ class LLMPromptStudio:
             else:
                 user_text = user_text.rstrip() + " /think"
 
-        # 3) build the user message content (text, + image for vision models)
-        if image is not None:
-            try:
-                data_url = _image_to_data_url(image, image_analysis_size)
-                user_content = [
-                    {"type": "text", "text": user_text},
-                    {"type": "image_url", "image_url": {"url": data_url}},
-                ]
-            except Exception as e:
-                print("[LLMPromptStudio] image encode failed:", e)
-                user_content = user_text
+        # 3) build the user message content (text, + pictures for vision models).
+        #    Each label is sent right BEFORE its own image so the model binds the
+        #    two: <Picture N> is the reference label H3 uses in its prompt format,
+        #    which lets the LLM cite an exact image instead of "the second one".
+        slots = [image] + [pictures.get("image_%d" % i) for i in range(2, MAX_PICTURES + 1)]
+        picture_urls = _collect_pictures(slots, image_analysis_size)
+        if picture_urls:
+            user_content = [{"type": "text", "text": user_text}]
+            for n, url in enumerate(picture_urls, 1):
+                user_content.append({"type": "text", "text": "<Picture %d>:" % n})
+                user_content.append({"type": "image_url", "image_url": {"url": url}})
+            print("[LLMPromptStudio] sending %d picture(s) as <Picture 1>..<Picture %d>"
+                  % (len(picture_urls), len(picture_urls)))
         else:
             user_content = user_text
 

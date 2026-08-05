@@ -7,7 +7,7 @@ specific image / video generator**.
 It ships with editable, ready-to-use prompt "cards" for:
 **Anima base v1**, **Illustrious**, **SDXL**, **FLUX.2 Klein (9B)**,
 **Krea 2 (Krea AI)**, **Ideogram**, **LTX-2 / LTX 2.3**, **Wan 2.2**,
-**MiniMax H3 / Hailuo 3** (two cards: *timeline* and *no timeline*), plus a
+**MiniMax H3 / Hailuo 3** (two cards: *normal* and *ref*), plus a
 generic preset.
 
 ---
@@ -48,13 +48,20 @@ generic preset.
 - **Conversation memory**: `keep_history` for multi-turn chat,
   `max_history_turns` to set how many past turns are remembered (context depth),
   and `reset_history` to clear it.
-- **Optional image input**: connect an `IMAGE` to use a vision model
-  (image → prompt / captioning).
-- **Image analysis size** (`image_analysis_size`): downscale the image before
-  it is sent — `original`, `2 MP`, `1.5 MP`, `1 MP`, `768 px`, `512 px`.
+- **Up to 8 image inputs**: `image`, `image_2` … `image_8`. Each connected
+  socket is announced to the LLM as **`<Picture 1>`, `<Picture 2>`…** following
+  the socket order, and the label is sent **just before its own image** so the
+  model binds the two. Empty sockets are skipped, so `image` + `image_3` still
+  gives you `<Picture 1>` and `<Picture 2>` — never a gap. `<Picture N>` is
+  MiniMax H3's own reference label, so the H3 cards can cite an exact image
+  instead of "the second one"; any vision model reads it just as well.
+  These are link sockets, not widgets, so they can't shift a saved workflow.
+- **Image analysis size** (`image_analysis_size`): downscale the images before
+  they are sent — `original`, `2 MP`, `1.5 MP`, `1 MP`, `768 px`, `512 px`.
   The `MP` presets keep the aspect ratio and target a total pixel count; the
   `px` presets cap the longest side. Images already smaller than the target are
-  never upscaled.
+  never upscaled. It applies to every connected socket, which matters once you
+  send 5–8 of them.
 
 Outputs:
 - `prompt` – the cleaned text (after the cut tag, **no thinking**). It is a
@@ -166,8 +173,10 @@ vllm serve Qwen/Qwen3-8B --port 8000          # add --api-key YOURKEY if you wan
 - **Context window vs. output**: `max_tokens` sets the **output** length. The
   model's raw **context window** (how much it can read in) is fixed when you
   load the model in LM Studio / vLLM, not per request — set it there.
-- **Vision**: connect an image and use a multimodal model (e.g. a Qwen-VL or
-  Gemma vision model) to caption/describe it into a prompt.
+- **Vision**: connect one or more images and use a multimodal model (e.g. a
+  Qwen-VL or Gemma vision model) to caption/describe them into a prompt. Refer
+  to them in `user_prompt` by the labels they arrive with: *"`<Picture 1>` is
+  the first frame, `<Picture 2>` the last one"*.
 - **Model presets are editable defaults** — tweak them in the box, or edit the
   source defaults in `prompt_templates.py`.
 
@@ -229,24 +238,39 @@ servers whose model names don't contain "deepseek".
 - LTX-2 / LTX 2.3 — Lightricks LTX prompting guide (4–8 sentences,
   subject→action→camera→lighting, motion verbs).
 - Wan 2.2 — Wan prompting guides (subject→motion→camera→scene, front-loaded).
-- MiniMax H3 / Hailuo 3 — fal / PixelDojo / AtlasCloud guides and the
-  reverse-engineered set of official prompts. Both cards share what makes H3
-  specific: 5–15 s of 2K with **native stereo audio out of the same pass** (so
-  sound is directed in the prompt, tied to what is visible), a locked-off frame
-  that has to be **refused in words** (H3 reframes on its own), exact strings for
-  on-screen text, and negatives that only bite on camera moves and unwanted text.
-  The sources disagree on timing, so the two readings ship side by side:
+- MiniMax H3 / Hailuo 3 — the **two official prompt-writing guides** shipped
+  with the model
+  ([MiniMaxAI/MiniMax-H3 → docs](https://huggingface.co/MiniMaxAI/MiniMax-H3/tree/main/docs)):
+  `VIDEO_PROMPT_WRITING_GUIDE_base_en` and `..._ref_en`. They replace the
+  community write-ups, which had the timing syntax wrong: H3 is **not** driven
+  by `[0s-2s]` spans but by **named fields plus numbered shots**. Both cards
+  encode the rules the two guides share — `[Shot 1]` carries no timestamp, later
+  shots open on a strictly increasing `At MM:SS.mmm`, a cut has to bring new
+  information (otherwise you move the camera instead), the camera is written as
+  natural English combining **motion type + amplitude + speed**, speakers get
+  stable `(S1)`/`(S2)` IDs with only the language tag and the verbatim words
+  inside `<d>…</d>` (`<scenetrans>` across a cut, `<cutoff>` at the end),
+  and on-screen text is quoted verbatim. Everything is English except dialogue
+  and text visible in the scene. What differs is the shape:
 
   | Card | What it writes | Use it for |
   |------|----------------|------------|
-  | **timeline** | style contract → **4–6 contiguous `[0s-2s]` / `[2s-4s]` spans** covering the whole duration with no gap, each closing on an observable end state → camera → audio **with its own timecodes** (*"at 6s the jazz bass groove joins"*) → text → negatives | multi-beat shots, precise reveals, sound design. This is how the strongest official prompts are built |
-  | **no timeline** | one continuous paragraph, no time codes, built on **a single visible change and a destination** (*"the ice cube melts until only a wet ring is left"*) | single-action shots, and image-to-video where the reference image already does the describing |
+  | **normal** | the base format: an optional task instruction line (**T2VA** none · **I2VA** first frame · **FL2VA** first+last · **L2VA** last frame, each verbatim from the guide), a blank line, then `integrated_multimodal_description:` → `overall_soundscape:` → `non_diegetic_music:` | the everyday case — text-to-video, and image-to-video where the pictures are frames |
+  | **ref** | the full-reference format: `subject_definitions` → `summary` (prefixed with its bracketed task types) → `retention_analysis` (`fully_preserved` / `attribute_transfer` / `fully_copy`…) → `detailed_description` (350–500 words, style stated **before** `[Shot 1]`) → `overall_soundscape` → `non_diegetic_music` | building from reference assets: reuse a character, a costume, a style, a source video or its audio |
 
-  H3 accepts 7000 characters, so even a full shot list with its sound cue sheet
-  fits in one request.
+  Both cards are told that connected images arrive as `<Picture 1>`,
+  `<Picture 2>`… in socket order and must be cited by those exact labels — which
+  is why the node takes 8 of them. The **ref** card also uses the guide's other
+  labels: `<Subject N>` for reusable visible content, `<Video N>`, `<Audio N>`;
+  an image that only defines a character or a style gets no `<Picture N>` line of
+  its own, it is cited inside the `<Subject N>` that uses it.
 
-  > The timeline card writes a **10 s** clip by default. Ask for another length
-  > in `user_prompt` ("8 seconds…") or pin it once in `global_directives`.
+  H3 accepts 7000 characters, so a full shot list with its sound design fits in
+  one request.
+
+  > The instruction line needs a duration. Both cards default to **10.00 s**;
+  > ask for another length in `user_prompt` ("8 seconds…") or pin it once in
+  > `global_directives`.
 
 > **Krea 2** here is Krea AI's own foundation image model (not the BFL "FLUX
 > Krea" collaboration). **Klein 9b** is read as FLUX.2 [klein] 9B. If you meant
