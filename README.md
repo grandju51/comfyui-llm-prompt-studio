@@ -56,6 +56,13 @@ generic preset.
   MiniMax H3's own reference label, so the H3 cards can cite an exact image
   instead of "the second one"; any vision model reads it just as well.
   These are link sockets, not widgets, so they can't shift a saved workflow.
+- **No invented pictures**: the node counts the connected sockets and states it
+  in the system prompt at request time — *"exactly 2 pictures are connected,
+  labelled `<Picture 1>`, `<Picture 2>` … never cite `<Picture 3>`"*, or *"no
+  image is connected, never mention one"* when the sockets are empty. Without
+  it, a model reads a `<Picture 3>` sitting in a card's formatting example and
+  cites an image it was never shown. The line is computed per run, so it always
+  matches what is actually wired — you never have to edit the card for it.
 - **Image analysis size** (`image_analysis_size`): downscale the images before
   they are sent — `original`, `2 MP`, `1.5 MP`, `1 MP`, `768 px`, `512 px`.
   The `MP` presets keep the aspect ratio and target a total pixel count; the

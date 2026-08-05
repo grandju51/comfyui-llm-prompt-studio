@@ -254,6 +254,34 @@ def _collect_pictures(images, size_mode: str):
     return urls
 
 
+def _picture_manifest(count: int) -> str:
+    """State how many pictures exist, so the model stops inventing them.
+
+    The cards are full of <Picture N> examples and the model happily copies a
+    number it was never given - citing <Picture 3> with a single image attached.
+    Counting the sockets is something only the node can do, so it says it out
+    loud in the system prompt rather than hoping the model infers it.
+    """
+    if count <= 0:
+        return ("[IMAGE INPUTS] None. No image is connected to this node, so you "
+                "have not been shown any picture. Never mention, cite or invent "
+                "one: no <Picture N> label may appear in your output, and any "
+                "example above that uses such a label is a formatting sample, not "
+                "a picture you were given.")
+    labels = ", ".join("<Picture %d>" % i for i in range(1, count + 1))
+    if count == 1:
+        head = "Exactly 1 picture is connected, labelled <Picture 1>."
+        rule = "It is the only picture that exists"
+    else:
+        head = ("Exactly %d pictures are connected, labelled %s, in that order."
+                % (count, labels))
+        rule = "They are the only pictures that exist"
+    return ("[IMAGE INPUTS] %s %s: never cite <Picture %d> or any higher number, "
+            "and never invent a picture you were not shown. Labels appearing in "
+            "the examples above are formatting samples, not extra pictures."
+            % (head, rule, count + 1))
+
+
 def _strip_before_tags(text: str, tags_csv: str) -> str:
     """Remove everything up to AND including the LATEST-occurring of the tags.
 
@@ -419,9 +447,17 @@ class LLMPromptStudio:
                  api_key="", image=None, no_think_model="", unique_id=None,
                  **pictures):
 
-        # 1) resolve the system prompt (fallback to preset if empty), then add
-        #    the user's global directives so they apply to every target model.
+        # 1) encode the connected images first: how many there are is a fact the
+        #    system prompt has to state, otherwise the model reads <Picture 3> in
+        #    a card's example and cites a picture that was never sent.
+        slots = [image] + [pictures.get("image_%d" % i) for i in range(2, MAX_PICTURES + 1)]
+        picture_urls = _collect_pictures(slots, image_analysis_size)
+
+        # 2) resolve the system prompt (fallback to preset if empty), then add
+        #    the picture manifest and the user's global directives so they apply
+        #    to every target model.
         sys_prompt = system_prompt.strip() or get_template(target_model)
+        sys_prompt += "\n\n" + _picture_manifest(len(picture_urls))
         gd = (global_directives or "").strip()
         if gd:
             sys_prompt = (
@@ -430,7 +466,7 @@ class LLMPromptStudio:
                 + "above]\n" + gd
             )
 
-        # 2) thinking control. The model is resolved FIRST because "off" may have
+        # 3) thinking control. The model is resolved FIRST because "off" may have
         #    to call a different one: on DeepSeek-style servers the reasoning mode
         #    is chosen by the alias, and a request that stays silent means ON.
         resolved_model = _resolve_model(base_url, api_key, model, timeout)
@@ -455,12 +491,10 @@ class LLMPromptStudio:
             else:
                 user_text = user_text.rstrip() + " /think"
 
-        # 3) build the user message content (text, + pictures for vision models).
+        # 4) build the user message content (text, + pictures for vision models).
         #    Each label is sent right BEFORE its own image so the model binds the
         #    two: <Picture N> is the reference label H3 uses in its prompt format,
         #    which lets the LLM cite an exact image instead of "the second one".
-        slots = [image] + [pictures.get("image_%d" % i) for i in range(2, MAX_PICTURES + 1)]
-        picture_urls = _collect_pictures(slots, image_analysis_size)
         if picture_urls:
             user_content = [{"type": "text", "text": user_text}]
             for n, url in enumerate(picture_urls, 1):
@@ -471,7 +505,7 @@ class LLMPromptStudio:
         else:
             user_content = user_text
 
-        # 4) assemble messages (with optional history)
+        # 5) assemble messages (with optional history)
         hist_key = str(unique_id) if unique_id is not None else "_default"
         if reset_history:
             _HISTORY.pop(hist_key, None)
@@ -483,7 +517,7 @@ class LLMPromptStudio:
             messages.extend(hist[-keep_msgs:])
         messages.append({"role": "user", "content": user_content})
 
-        # 5) build the request payload (top-level extras work for LM Studio + vLLM;
+        # 6) build the request payload (top-level extras work for LM Studio + vLLM;
         #    both penalty spellings are sent so each backend picks the one it knows)
         payload = {
             "model": resolved_model,
@@ -508,7 +542,7 @@ class LLMPromptStudio:
 
         url = _endpoint(base_url, "/chat/completions")
 
-        # 6) call the server
+        # 7) call the server
         try:
             result = _http_post_json(url, payload, api_key, timeout)
         except urllib.error.HTTPError as e:
@@ -524,7 +558,7 @@ class LLMPromptStudio:
             print(msg)
             return _ui_result(msg, msg)
 
-        # 7) extract the text
+        # 8) extract the text
         try:
             choice = result["choices"][0]["message"]
             raw = choice.get("content") or ""
@@ -536,7 +570,7 @@ class LLMPromptStudio:
 
         cleaned = _strip_before_tags(raw, strip_before_tag)
 
-        # 8) update history (store text turns only)
+        # 9) update history (store text turns only)
         if keep_history:
             turn = _HISTORY.setdefault(hist_key, [])
             turn.append({"role": "user", "content": user_text})
