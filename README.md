@@ -275,6 +275,13 @@ servers whose model names don't contain "deepseek".
   H3 accepts 7000 characters, so a full shot list with its sound design fits in
   one request.
 
+  > **State the graphic style, always.** Left unsaid, H3 picks a look of its own
+  > and re-styles your reference image. Both cards now treat it as mandatory and
+  > read it off the connected pictures — medium (photo, anime, 3D render,
+  > illustration, painting), line and shading treatment, palette, grain,
+  > lighting. Placement differs: **inside `[Shot 1]`** on the *normal* card,
+  > **in one or two sentences before `[Shot 1]`** on the *ref* card.
+
   > The instruction line needs a duration. Both cards default to **10.00 s**;
   > ask for another length in `user_prompt` ("8 seconds…") or pin it once in
   > `global_directives`.
