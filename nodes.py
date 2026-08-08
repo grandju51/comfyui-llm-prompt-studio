@@ -18,6 +18,9 @@ Features
 - Optional conversation memory (multi-turn) with a reset toggle.
 - Up to 8 image inputs for vision models, announced to the LLM as <Picture 1>,
   <Picture 2>... in input order - the reference labels MiniMax H3 itself uses.
+- A video input sampled into frames (1 out of N, capped, spread over the whole
+  clip) so the model describes a video it has actually seen, plus audio/video
+  role widgets declaring what each asset is FOR when it cannot be shown.
 """
 
 import base64
@@ -98,6 +101,46 @@ _AUDIO_ROLE_RULES = {
         "that speaker's existing (Sx) instead of assigning a new one"),
 }
 
+# What a connected video is FOR, in H3's own vocabulary. Same trap as above: no
+# "/" in a value. A video reaches ComfyUI as a batch of frames, so the node CAN
+# show some of them to a vision model - but it still cannot see the frames it did
+# not sample, which is why the role is declared separately from the frames.
+VIDEO_ROLES = [
+    "none - no video",
+    "edit the source video (video editing)",
+    "continue from the source video (video continuation)",
+    "keep its motion, cuts and rhythm (reference)",
+    "loose atmosphere or style only (weak_reference)",
+]
+# role -> (bracketed task type or None, the sentence that defines <Video 1>,
+#          how retention_analysis should treat it)
+_VIDEO_ROLE_RULES = {
+    VIDEO_ROLES[1]: (
+        "video editing",
+        "<Video 1> is the source video for the target video edit. The target video "
+        "is an edited version of <Video 1>.",
+        "name what changes and what is kept: partially_preserved when you alter "
+        "something in it, and an explicit fully_preserved line for the aspects you "
+        "keep untouched, e.g. \"<Video 1> (camera movement, background and pacing): "
+        "fully_preserved\""),
+    VIDEO_ROLES[2]: (
+        "video continuation",
+        "<Video 1> is the source video the target video continues from.",
+        "state which aspects carry over: subject, setting, camera behaviour and "
+        "pacing are usually fully_preserved across the cut"),
+    VIDEO_ROLES[3]: (
+        None,
+        "<Video 1> is the reference for the target video's camera movement, cuts "
+        "and temporal structure.",
+        "give it one line \"<Video 1> (camera movement, cuts and pacing): "
+        "fully_preserved - ...\" and do NOT add a bracketed task type for it"),
+    VIDEO_ROLES[4]: (
+        None,
+        "<Video 1> is a loose atmosphere reference for the target video.",
+        "give it one line \"<Video 1> (style and atmosphere): weak_reference - ...\" "
+        "and do NOT add a bracketed task type for it"),
+}
+
 # Image downscaling presets for vision analysis.
 # Megapixel entries keep the aspect ratio and target a total pixel count;
 # pixel entries cap the LONGEST side. "original" sends the image untouched.
@@ -110,7 +153,18 @@ IMAGE_SIZES = [
     "512 px",
 ]
 _IMAGE_SIZE_MP = {"2 MP": 2.0, "1.5 MP": 1.5, "1 MP": 1.0}
-_IMAGE_SIZE_PX = {"768 px": 768, "512 px": 512}
+
+# Frames are sent by the dozen, so they get their own (smaller) size ladder.
+# Every entry caps the LONGEST side; _target_size reads them from _IMAGE_SIZE_PX.
+VIDEO_FRAME_SIZES = [
+    "512 px", "384 px", "256 px", "128 px", "768 px", "1024 px", "original",
+]
+_IMAGE_SIZE_PX = {"1024 px": 1024, "768 px": 768, "512 px": 512,
+                  "384 px": 384, "256 px": 256, "128 px": 128}
+
+# Past this many frames a single request gets heavy (roughly 700 vision tokens
+# per frame at 512 px). The node warns and obeys: the ceiling is the user's call.
+VIDEO_FRAMES_ADVISED = 16
 
 
 def _endpoint(base_url: str, path: str) -> str:
@@ -290,6 +344,118 @@ def _collect_pictures(images, size_mode: str):
     return urls
 
 
+def _pick_frame_indices(total: int, stride: int, max_frames: int):
+    """Which frames of a video batch to send.
+
+    Two knobs, applied in that order: keep one frame out of ``stride``, then thin
+    the result down to ``max_frames`` spread over the WHOLE clip - taking the
+    first N instead would show the opening seconds and nothing else, which is the
+    surest way to make the model invent the rest. 0 sends no frame at all, the
+    mode to pick when the writer is a text-only LLM.
+    """
+    total = int(total)
+    max_frames = int(max_frames)
+    if total <= 0 or max_frames == 0:
+        return []
+    idx = list(range(0, total, max(1, int(stride))))
+    if max_frames > 0 and len(idx) > max_frames:
+        if max_frames == 1:
+            return [idx[0]]
+        step = (len(idx) - 1) / float(max_frames - 1)
+        idx = sorted({idx[int(round(i * step))] for i in range(max_frames)})
+    return idx
+
+
+def _timestamp(frame_index: int, fps: float) -> str:
+    """MM:SS.mmm for a frame number, the timestamp shape H3 writes."""
+    t = frame_index / float(fps)
+    return "%02d:%06.3f" % (int(t // 60), t % 60)
+
+
+def _collect_video_frames(video, stride: int, max_frames: int, size_mode: str,
+                          fps: float):
+    """Sample the connected video into (label, data URL) pairs.
+
+    A video arrives as a batch of frames, so sampling is all the node has to do
+    to let a vision model actually LOOK at it instead of guessing its content.
+    Returns the pairs plus the batch length, which the manifest needs to say how
+    much of the clip was left out.
+    """
+    if video is None:
+        return [], 0
+    try:
+        total = len(video)
+    except Exception as e:
+        print("[LLMPromptStudio] video input has no frames: %s" % e)
+        return [], 0
+    idx = _pick_frame_indices(total, stride, max_frames)
+    items = []
+    for n, i in enumerate(idx, 1):
+        try:
+            url = _image_to_data_url(video[i:i + 1], size_mode)
+        except Exception as e:
+            print("[LLMPromptStudio] video frame %d could not be encoded: %s" % (i, e))
+            continue
+        stamp = " at %s" % _timestamp(i, fps) if fps and fps > 0 else ""
+        items.append(("<Video 1> frame %d of %d%s:" % (n, len(idx), stamp), url))
+    if items:
+        print("[LLMPromptStudio] video: %d frames in the batch, sending %d (1 out "
+              "of %d, capped at %d, %s)"
+              % (total, len(items), max(1, int(stride)), max_frames, size_mode))
+    if len(items) > VIDEO_FRAMES_ADVISED:
+        print("[LLMPromptStudio] %d frames is above the advised %d: expect a large "
+              "request and a big vision-token bill."
+              % (len(items), VIDEO_FRAMES_ADVISED))
+    return items, total
+
+
+def _video_manifest(connected: bool, role: str, sent: int, total: int,
+                    fps: float) -> str:
+    """State whether the video was actually SEEN, and what it is for.
+
+    The whole point of the video input: the model must never describe a source it
+    was not shown. Either it got frames - then it may describe what is ON them
+    and nothing else - or it got none, and <Video 1> is a label it designates
+    without ever saying what it contains.
+    """
+    rule = _VIDEO_ROLE_RULES.get(role)
+    if not connected and not rule:
+        return ""
+    if sent > 0:
+        span = ("They are evenly spaced over the whole clip (%d frames in total%s)"
+                % (total, ", %.3g fps" % fps if fps and fps > 0 else ""))
+        seen = (
+            "You have been shown %d still frames sampled from it, labelled "
+            "\"<Video 1> frame 1 of %d\" and so on. %s, so you have NOT seen what "
+            "happens between them: describe only what is visible ON the frames, "
+            "and never narrate an action, a cut or a sound you did not see. They "
+            "are frames of ONE video, not separate reference pictures - never call "
+            "them <Picture N>." % (sent, sent, span))
+    elif connected:
+        seen = ("No frame was sampled from it (the frame count is set to 0), so you "
+                "have NOT seen it. Never describe its content: designate it as "
+                "<Video 1> and reuse the user's own words about it.")
+    else:
+        seen = ("It is not wired into this node, so you have NOT seen it. Never "
+                "describe its content: designate it as <Video 1> and reuse the "
+                "user's own words about it.")
+    if rule:
+        task_type, definition, retention = rule
+        what = ("Declare it in subject_definitions with: \"%s\" %s In "
+                "retention_analysis, %s."
+                % (definition,
+                   "Add \"%s\" to the bracketed task types of summary." % task_type
+                   if task_type else "", retention))
+    else:
+        what = ("Its role was left unset, so infer it from the user's request and "
+                "state plainly what the target video keeps from it.")
+    return ("[VIDEO INPUT] One video exists and it is labelled <Video 1>. %s %s "
+            "Whatever the user did not state and the frames do not show simply is "
+            "not yours to invent. If the format you are writing has no reference "
+            "labels, carry the same intent in plain words instead of using "
+            "<Video 1>." % (seen, what))
+
+
 def _picture_manifest(count: int) -> str:
     """State how many pictures exist, so the model stops inventing them.
 
@@ -312,10 +478,18 @@ def _picture_manifest(count: int) -> str:
         head = ("Exactly %d pictures are connected, labelled %s, in that order."
                 % (count, labels))
         rule = "They are the only pictures that exist"
+    # Several angles of one person are one subject, not one per socket: a format
+    # using <Subject N> wants "<Subject 1> is the character from <Picture 1> and
+    # <Picture 2>", and left unsaid the model dutifully invents a second character.
+    same = ("" if count < 2 else
+            " Pictures showing the SAME person or object are one single subject: if "
+            "the format you are writing uses <Subject N>, define it once as "
+            "\"<Subject 1> is the character from <Picture 1> and <Picture 2>\" "
+            "instead of creating one subject per picture.")
     return ("[IMAGE INPUTS] %s %s: never cite <Picture %d> or any higher number, "
             "and never invent a picture you were not shown. Labels appearing in "
-            "the examples above are formatting samples, not extra pictures."
-            % (head, rule, count + 1))
+            "the examples above are formatting samples, not extra pictures.%s"
+            % (head, rule, count + 1, same))
 
 
 def _audio_manifest(connected: bool, role: str) -> str:
@@ -494,9 +668,16 @@ class LLMPromptStudio:
                        "is FOR is set by audio_role. The node does not listen to "
                        "it - it declares it, so the prompt can carry the reuse or "
                        "reference relationship H3 expects."})
+        optional["video"] = ("IMAGE", {
+            "tooltip": "Optional source video, as the IMAGE batch a video loader "
+                       "outputs. Frames are sampled from it and shown to the vision "
+                       "model, so the prompt can talk about a video it has really "
+                       "seen. Labelled <Video 1>; how many frames and what for is "
+                       "set by the video_* widgets below."})
         # Kept LAST: widget values are serialized positionally, so a new widget
         # anywhere else would shift saved workflows by one slot. audio_role is
-        # appended AFTER no_think_model for the same reason.
+        # appended AFTER no_think_model for the same reason, and the video widgets
+        # after both.
         optional["no_think_model"] = ("STRING", {"default": "",
             "tooltip": "No-think override: the model alias called INSTEAD when "
                        "thinking = off. DeepSeek-style servers read a request with "
@@ -511,6 +692,37 @@ class LLMPromptStudio:
                        "to the LLM even if nothing is wired into the audio socket, "
                        "which is what you want when the track is fed to the video "
                        "model further down the graph."})
+        optional["video_stride"] = ("INT", {"default": 4, "min": 1, "max": 9999,
+            "tooltip": "Take 1 frame out of N from the connected video. 1 = every "
+                       "frame, 4 = one out of four. The result is then thinned down "
+                       "to video_max_frames, so this mostly sets WHERE the samples "
+                       "come from on a long clip."})
+        optional["video_max_frames"] = ("INT", {"default": 8, "min": 0, "max": 999,
+            "tooltip": "Hard cap on the frames actually sent, spread over the whole "
+                       "clip. 0 = send NO frame: the video is still declared as "
+                       "<Video 1> but the LLM never sees it, which is the mode for a "
+                       "text-only model. Above ~16 the request gets heavy (roughly "
+                       "700 vision tokens per frame at 512 px) - the node warns and "
+                       "obeys."})
+        optional["video_frame_size"] = (VIDEO_FRAME_SIZES, {
+            "default": VIDEO_FRAME_SIZES[0],
+            "tooltip": "Longest side each frame is downscaled to before sending. "
+                       "Frames go by the dozen, so keep it small: 512 px reads fine, "
+                       "256 px is enough to follow an action, 128 px only for "
+                       "counting shots."})
+        optional["video_fps"] = ("FLOAT", {"default": 0.0, "min": 0.0, "max": 240.0,
+            "step": 0.1,
+            "tooltip": "Frame rate of the connected video. Set it and every sampled "
+                       "frame is labelled with its real timestamp, so the model "
+                       "writes 'At MM:SS.mmm' on actual times instead of made-up "
+                       "ones. 0 = unknown, frames are only numbered."})
+        optional["video_role"] = (VIDEO_ROLES, {
+            "default": VIDEO_ROLES[0],
+            "tooltip": "What the video is FOR, in MiniMax H3's own vocabulary. "
+                       "Picking anything but 'none' declares <Video 1> to the LLM "
+                       "even with nothing wired into the video socket - what you "
+                       "want when the clip goes straight to the video model further "
+                       "down the graph."})
         return spec
 
     # Always re-run when the seed changes (control_after_generate); fixed seed = cached.
@@ -525,13 +737,19 @@ class LLMPromptStudio:
                  keep_history, max_history_turns, reset_history, timeout,
                  image_analysis_size="original",
                  api_key="", image=None, no_think_model="", unique_id=None,
-                 audio=None, audio_role=AUDIO_ROLES[0], **pictures):
+                 audio=None, audio_role=AUDIO_ROLES[0], video=None,
+                 video_stride=4, video_max_frames=8,
+                 video_frame_size=VIDEO_FRAME_SIZES[0], video_fps=0.0,
+                 video_role=VIDEO_ROLES[0], **pictures):
 
         # 1) encode the connected images first: how many there are is a fact the
         #    system prompt has to state, otherwise the model reads <Picture 3> in
-        #    a card's example and cites a picture that was never sent.
+        #    a card's example and cites a picture that was never sent. Same idea
+        #    for the video, except the fact to state is how much of it was seen.
         slots = [image] + [pictures.get("image_%d" % i) for i in range(2, MAX_PICTURES + 1)]
         picture_urls = _collect_pictures(slots, image_analysis_size)
+        frames, frame_total = _collect_video_frames(
+            video, video_stride, video_max_frames, video_frame_size, video_fps)
 
         # 2) resolve the system prompt (fallback to preset if empty), then add
         #    the asset manifests and the user's global directives so they apply
@@ -542,6 +760,12 @@ class LLMPromptStudio:
         if audio_note:
             sys_prompt += "\n\n" + audio_note
             print("[LLMPromptStudio] audio declared as <Audio 1>: %s" % audio_role)
+        video_note = _video_manifest(video is not None, video_role, len(frames),
+                                     frame_total, video_fps)
+        if video_note:
+            sys_prompt += "\n\n" + video_note
+            print("[LLMPromptStudio] video declared as <Video 1>: %s (%d frames sent)"
+                  % (video_role, len(frames)))
         gd = (global_directives or "").strip()
         if gd:
             sys_prompt = (
@@ -579,13 +803,20 @@ class LLMPromptStudio:
         #    Each label is sent right BEFORE its own image so the model binds the
         #    two: <Picture N> is the reference label H3 uses in its prompt format,
         #    which lets the LLM cite an exact image instead of "the second one".
-        if picture_urls:
+        #    The video frames follow the pictures, each one carrying its own
+        #    position in the clip, so the model reads them as one timeline rather
+        #    than as extra reference images.
+        if picture_urls or frames:
             user_content = [{"type": "text", "text": user_text}]
             for n, url in enumerate(picture_urls, 1):
                 user_content.append({"type": "text", "text": "<Picture %d>:" % n})
                 user_content.append({"type": "image_url", "image_url": {"url": url}})
-            print("[LLMPromptStudio] sending %d picture(s) as <Picture 1>..<Picture %d>"
-                  % (len(picture_urls), len(picture_urls)))
+            for label, url in frames:
+                user_content.append({"type": "text", "text": label})
+                user_content.append({"type": "image_url", "image_url": {"url": url}})
+            if picture_urls:
+                print("[LLMPromptStudio] sending %d picture(s) as <Picture 1>..<Picture %d>"
+                      % (len(picture_urls), len(picture_urls)))
         else:
             user_content = user_text
 

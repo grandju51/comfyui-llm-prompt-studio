@@ -7,7 +7,7 @@ specific image / video generator**.
 It ships with editable, ready-to-use prompt "cards" for:
 **Anima base v1**, **Illustrious**, **SDXL**, **FLUX.2 Klein (9B)**,
 **Krea 2 (Krea AI)**, **Ideogram**, **LTX-2 / LTX 2.3**, **Wan 2.2**,
-**MiniMax H3 / Hailuo 3** (two cards: *normal* and *ref*), plus a
+**MiniMax H3 / Hailuo 3** (three cards: *normal*, *ref* and *edit*), plus a
 generic preset.
 
 ---
@@ -81,6 +81,39 @@ generic preset.
   graph. Leave the role on `none` but connect the socket and the LLM is told to
   infer the role from your request. With neither, not a word about audio is
   added — the nine non-video cards stay clean.
+- **Video input** (`video` socket + the `video_*` widgets): connect the `IMAGE`
+  batch a video loader outputs and the node **samples frames out of it** and
+  shows them to the vision model, labelled `<Video 1> frame 3 of 8`. That is the
+  cure for the model inventing a clip it never saw.
+
+  | Widget | What it does |
+  |---|---|
+  | `video_stride` | keep 1 frame out of N (`4` by default) |
+  | `video_max_frames` | hard cap, spread over the **whole** clip — `8` by default, `0` = send no frame at all |
+  | `video_frame_size` | longest side per frame: `512`, `384`, `256`, `128`, `768`, `1024 px`, `original` |
+  | `video_fps` | the clip's frame rate; set it and each frame gets its real `MM:SS.mmm` timestamp, so H3's `At 00:02.400` lands on a real time. `0` = unknown |
+  | `video_role` | what the video is *for* (see below) |
+
+  The cap thins the strided selection **evenly across the clip** instead of
+  taking the first N — sampling only the opening seconds is the surest way to
+  make the model guess the rest. Above ~16 frames the request gets heavy
+  (≈700 vision tokens per frame at 512 px); the node prints a warning and obeys,
+  the ceiling is yours. Set `video_max_frames` to `0` when the writer is a
+  **text-only LLM**: the video is still declared as `<Video 1>`, but the prompt
+  is told plainly that it was *not* seen and must reuse your own words about it
+  rather than describe it.
+
+  | `video_role` | Declared as | Task type added to `summary` |
+  |---|---|---|
+  | edit the source video | `<Video 1> is the source video for the target video edit.` | `video editing` |
+  | continue from the source video | `…the source video the target video continues from.` | `video continuation` |
+  | keep its motion, cuts and rhythm | `…the reference for camera movement, cuts and temporal structure.` | none — retention line only |
+  | loose atmosphere or style only | `…a loose atmosphere reference.` | none — retention line only |
+
+  Like `audio_role`, picking anything but `none` declares `<Video 1>` even with
+  nothing wired — for when the clip goes straight to the video model further
+  down the graph. Frames are sent **after** the pictures and are announced as
+  one timeline, never as extra `<Picture N>`.
 - **Image analysis size** (`image_analysis_size`): downscale the images before
   they are sent — `original`, `2 MP`, `1.5 MP`, `1 MP`, `768 px`, `512 px`.
   The `MP` presets keep the aspect ratio and target a total pixel count; the
@@ -281,7 +314,22 @@ servers whose model names don't contain "deepseek".
   | Card | What it writes | Use it for |
   |------|----------------|------------|
   | **normal** | the base format: an optional task instruction line (**T2VA** none · **I2VA** first frame · **FL2VA** first+last · **L2VA** last frame, each verbatim from the guide), a blank line, then `integrated_multimodal_description:` → `overall_soundscape:` → `non_diegetic_music:` | the everyday case — text-to-video, and image-to-video where the pictures are frames |
-  | **ref** | the full-reference format: `subject_definitions` → `summary` (prefixed with its bracketed task types) → `retention_analysis` (`fully_preserved` / `attribute_transfer` / `fully_copy`…) → `detailed_description` (350–500 words, style stated **before** `[Shot 1]`) → `overall_soundscape` → `non_diegetic_music` | building from reference assets: reuse a character, a costume, a style, a source video or its audio |
+  | **ref** | the full-reference format: `subject_definitions` → `summary` (prefixed with its bracketed task types) → `retention_analysis` (`fully_preserved` / `attribute_transfer` / `fully_copy`…) → `detailed_description` (350–500 words, style stated **before** `[Shot 1]`) → `overall_soundscape` → `non_diegetic_music` | building from **image** reference assets: reuse a character, a costume, a style, or an audio track |
+  | **edit** | the same six sections, but centred on `retention_analysis` and deliberately shorter | anything that **starts from an existing video**: editing it, continuing it, swapping its character or its setting, following its camera work |
+
+  The **edit** card exists because of one failure mode: asked about a source
+  video, an LLM writes a beautiful description of footage it never saw, and H3
+  then generates that invention instead of editing your clip. So the card's
+  first rule outranks all the others — *what you write about the source comes
+  from the sampled frames or from the user's own words, and from nothing else*.
+  When it has not seen the video it **designates** it (`the subject of
+  <Video 1>`, `the original camera movement`) instead of describing it, states
+  no duration, shot count or timestamp the user did not give, and keeps
+  `detailed_description` short: padding it to the 350–500 words of a generation
+  task is precisely how invented content gets in. What it *does* author is the
+  **change** — what is replaced, what is preserved — which is what
+  `retention_analysis` is for. The `normal` and `ref` cards were emptied of all
+  source-video material and now point here instead.
 
   Both cards are told that connected images arrive as `<Picture 1>`,
   `<Picture 2>`… in socket order and must be cited by those exact labels — which
