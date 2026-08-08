@@ -63,6 +63,24 @@ generic preset.
   it, a model reads a `<Picture 3>` sitting in a card's formatting example and
   cites an image it was never shown. The line is computed per run, so it always
   matches what is actually wired — you never have to edit the card for it.
+- **Audio reference** (`audio` socket + `audio_role` dropdown): declares to the
+  LLM that an audio signal exists and is labelled **`<Audio 1>`**, and what it
+  is *for*, in MiniMax H3's own vocabulary. The node does **not** listen to the
+  track — it carries the relationship the prompt has to state:
+
+  | `audio_role` | Retention marker | Task type added to `summary` |
+  |---|---|---|
+  | reuse in full | `fully_copy` | `audio reuse` |
+  | reuse in part | `partially_copy` | `audio reuse` |
+  | reference the style, timbre or rhythm | `reference` | `audio reference` |
+  | loose atmosphere only | `weak_reference` | `audio reference` |
+  | voice timbre reference for a speaker | `reference` | `audio reference` |
+
+  Picking anything but `none` declares `<Audio 1>` **even with nothing wired**,
+  which is what you want when the track reaches the video model further down the
+  graph. Leave the role on `none` but connect the socket and the LLM is told to
+  infer the role from your request. With neither, not a word about audio is
+  added — the nine non-video cards stay clean.
 - **Image analysis size** (`image_analysis_size`): downscale the images before
   they are sent — `original`, `2 MP`, `1.5 MP`, `1 MP`, `768 px`, `512 px`.
   The `MP` presets keep the aspect ratio and target a total pixel count; the

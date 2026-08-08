@@ -62,6 +62,42 @@ def _looks_deepseek(model: str) -> bool:
 # label MiniMax H3 uses in its own prompt format.
 MAX_PICTURES = 8
 
+# What a connected audio is FOR. The names are MiniMax H3's own relationship
+# markers: the node cannot listen to the track, but it can state the role, which
+# is the part the prompt has to carry. Definitions come from the reference guide.
+# No "/" in a value: ComfyUI reads it as a path separator and splits the entry
+# into nested submenus, the same trap TEMPLATE_ORDER carries a warning about.
+AUDIO_ROLES = [
+    "none - no audio",
+    "reuse in full (fully_copy)",
+    "reuse in part (partially_copy)",
+    "reference the style, timbre or rhythm (reference)",
+    "loose atmosphere only (weak_reference)",
+    "voice timbre reference for a speaker (reference)",
+]
+# role -> (retention marker, summary task type, what the marker means)
+_AUDIO_ROLE_RULES = {
+    AUDIO_ROLES[1]: (
+        "fully_copy", "audio reuse",
+        "the complete source audio is the target video's complete final audio track"),
+    AUDIO_ROLES[2]: (
+        "partially_copy", "audio reuse",
+        "only part of the timeline or selected audio layers are copied, or other "
+        "sounds are added, removed or replaced"),
+    AUDIO_ROLES[3]: (
+        "reference", "audio reference",
+        "the signal is not copied: only timbre, rhythm, music style, dialogue "
+        "content or sound texture is referenced"),
+    AUDIO_ROLES[4]: (
+        "weak_reference", "audio reference",
+        "only a broad similarity in category or atmosphere is retained"),
+    AUDIO_ROLES[5]: (
+        "reference", "audio reference",
+        "it is the voice-timbre reference for one speaker: define it as "
+        "\"<Audio 1> is the voice-timbre reference for <Subject N> (Sx)\" and reuse "
+        "that speaker's existing (Sx) instead of assigning a new one"),
+}
+
 # Image downscaling presets for vision analysis.
 # Megapixel entries keep the aspect ratio and target a total pixel count;
 # pixel entries cap the LONGEST side. "original" sends the image untouched.
@@ -282,6 +318,36 @@ def _picture_manifest(count: int) -> str:
             % (head, rule, count + 1))
 
 
+def _audio_manifest(connected: bool, role: str) -> str:
+    """State that an audio reference exists and what it is for.
+
+    Returns "" when there is nothing to declare, so the nine non-video cards
+    never carry a paragraph about a track that does not exist. The negative case
+    needs no line: <Audio N> only lives in the full-reference card, which already
+    says the label exists solely when the user provides such a source.
+    """
+    rule = _AUDIO_ROLE_RULES.get(role)
+    if not connected and not rule:
+        return ""
+    where = ("One audio is connected to this node" if connected
+             else "One audio track is supplied to the video model further down the "
+                  "graph (it is not wired into this node)")
+    if rule:
+        marker, task_type, meaning = rule
+        what = ("Its role is %s: %s. In the full-reference format, declare it in "
+                "subject_definitions, add \"%s\" to the bracketed task types of "
+                "summary, give it its own retention_analysis line \"<Audio 1>: %s - "
+                "...\" with no (Sx) in that section, and state the copy or reference "
+                "relationship only in the section matching the audible layer."
+                % (marker, meaning, task_type, marker))
+    else:
+        what = ("Its role was left unset, so infer it from the user's request and "
+                "say plainly whether the track is reused or merely referenced.")
+    return ("[AUDIO INPUT] %s and it is labelled <Audio 1>. %s If the format you are "
+            "writing has no reference labels, carry the same intent in plain words "
+            "instead of using <Audio 1>." % (where, what))
+
+
 def _strip_before_tags(text: str, tags_csv: str) -> str:
     """Remove everything up to AND including the LATEST-occurring of the tags.
 
@@ -422,8 +488,15 @@ class LLMPromptStudio:
                 "tooltip": "Extra reference image. Connected images are numbered in "
                            "socket order, so this one reaches the LLM as <Picture %d> "
                            "when every socket above it is used too." % i})
+        optional["audio"] = ("AUDIO", {
+            "tooltip": "Optional audio reference. Connecting it tells the LLM that "
+                       "an audio signal exists and is labelled <Audio 1>; what it "
+                       "is FOR is set by audio_role. The node does not listen to "
+                       "it - it declares it, so the prompt can carry the reuse or "
+                       "reference relationship H3 expects."})
         # Kept LAST: widget values are serialized positionally, so a new widget
-        # anywhere else would shift saved workflows by one slot.
+        # anywhere else would shift saved workflows by one slot. audio_role is
+        # appended AFTER no_think_model for the same reason.
         optional["no_think_model"] = ("STRING", {"default": "",
             "tooltip": "No-think override: the model alias called INSTEAD when "
                        "thinking = off. DeepSeek-style servers read a request with "
@@ -431,6 +504,13 @@ class LLMPromptStudio:
                        "alias is what really turns reasoning off. Empty = auto (a "
                        "DeepSeek model becomes 'deepseek-chat' if the server serves "
                        "it)."})
+        optional["audio_role"] = (AUDIO_ROLES, {
+            "default": AUDIO_ROLES[0],
+            "tooltip": "What the connected audio is FOR, in MiniMax H3's own "
+                       "vocabulary. Picking anything but 'none' declares <Audio 1> "
+                       "to the LLM even if nothing is wired into the audio socket, "
+                       "which is what you want when the track is fed to the video "
+                       "model further down the graph."})
         return spec
 
     # Always re-run when the seed changes (control_after_generate); fixed seed = cached.
@@ -445,7 +525,7 @@ class LLMPromptStudio:
                  keep_history, max_history_turns, reset_history, timeout,
                  image_analysis_size="original",
                  api_key="", image=None, no_think_model="", unique_id=None,
-                 **pictures):
+                 audio=None, audio_role=AUDIO_ROLES[0], **pictures):
 
         # 1) encode the connected images first: how many there are is a fact the
         #    system prompt has to state, otherwise the model reads <Picture 3> in
@@ -454,10 +534,14 @@ class LLMPromptStudio:
         picture_urls = _collect_pictures(slots, image_analysis_size)
 
         # 2) resolve the system prompt (fallback to preset if empty), then add
-        #    the picture manifest and the user's global directives so they apply
+        #    the asset manifests and the user's global directives so they apply
         #    to every target model.
         sys_prompt = system_prompt.strip() or get_template(target_model)
         sys_prompt += "\n\n" + _picture_manifest(len(picture_urls))
+        audio_note = _audio_manifest(audio is not None, audio_role)
+        if audio_note:
+            sys_prompt += "\n\n" + audio_note
+            print("[LLMPromptStudio] audio declared as <Audio 1>: %s" % audio_role)
         gd = (global_directives or "").strip()
         if gd:
             sys_prompt = (
