@@ -220,11 +220,21 @@ vllm serve Qwen/Qwen3-8B --port 8000          # add --api-key YOURKEY if you wan
   `prompt`. For models that use other reasoning tags, list them all
   comma-separated, e.g. `</think>,</thinking>,</reasoning>`.
 - **min_p** is sent as a top-level field (supported by LM Studio/llama.cpp and
-  vLLM; ignored by backends that don't know it). `0.0` disables it. A common
-  setup is `min_p = 0.05-0.1` with `top_p = 1.0` so min-p does the filtering.
+  vLLM). `0.0` disables it. A common setup is `min_p = 0.05-0.1` with
+  `top_p = 1.0` so min-p does the filtering.
 - **top_k / repeat_penalty** are sent as top-level fields. Both
   `repetition_penalty` (vLLM) and `repeat_penalty` (LM Studio/llama.cpp) are
   included so each backend uses the one it understands.
+- **Extension fields are only sent when they do something.** `top_k`, `min_p`
+  and the two penalty spellings are *not* part of the OpenAI schema, and a
+  backend that validates its request body answers **400** on the first one it
+  doesn't know — generating nothing at all, which looks from ComfyUI like the
+  request was simply cancelled. So a neutral value (`top_k = 0`, `min_p = 0`,
+  `repeat_penalty = 1.0`) is left out of the request entirely, and if a 400/422
+  still comes back the node **retries once without every extension** —
+  including the thinking switches — and prints exactly what it dropped. You get
+  an answer instead of a dead end; the cut tag still strips any reasoning block
+  the retry let through.
 - **Multi-turn**: turn on `keep_history`. Each queued run appends a turn, and
   `max_history_turns` controls how many past turns are remembered (context
   depth). Flip `reset_history` on (and queue once) to wipe the memory.

@@ -266,6 +266,45 @@ def _no_think_model(base_url: str, api_key: str, model: str, override: str,
     return model
 
 
+# Everything here is an extension to the OpenAI chat schema. Backends that
+# validate their request body reject the first one they do not know.
+_EXTENSION_FIELDS = ("top_k", "min_p", "repetition_penalty", "repeat_penalty",
+                     "chat_template_kwargs", "thinking")
+
+
+def _post_chat(url: str, payload: dict, api_key: str, timeout: int):
+    """POST the request, retrying once without the extension fields.
+
+    A strict backend answers 400/422 on an unknown field and generates nothing
+    at all, which reads from ComfyUI as the request being simply cancelled. The
+    retry turns that dead end into an answer and names what it had to drop -
+    including the thinking switches, whose reasoning block the cut tag still
+    removes from the output. Returns (result, error_text); one of the two is
+    always None.
+    """
+    def _body(e):
+        try:
+            return e.read().decode("utf-8")
+        except Exception:
+            return ""
+
+    try:
+        return _http_post_json(url, payload, api_key, timeout), None
+    except urllib.error.HTTPError as e:
+        first = "[LLM HTTP ERROR %s] %s\n%s" % (e.code, url, _body(e))
+        stripped = {k: v for k, v in payload.items() if k not in _EXTENSION_FIELDS}
+        if e.code not in (400, 422) or len(stripped) == len(payload):
+            return None, first
+        dropped = ", ".join(k for k in payload if k not in stripped)
+        print("[LLMPromptStudio] %s refused the request (HTTP %s); retrying "
+              "without %s" % (url, e.code, dropped))
+        try:
+            return _http_post_json(url, stripped, api_key, timeout), None
+        except urllib.error.HTTPError as e2:
+            return None, ("%s\n[retry without %s] HTTP %s\n%s"
+                          % (first, dropped, e2.code, _body(e2)))
+
+
 def _ui_result(prompt_text: str, raw_text: str):
     """Return both the on-node text preview and the two STRING outputs."""
     return {"ui": {"text": [prompt_text]}, "result": (prompt_text, raw_text)}
@@ -838,21 +877,28 @@ class LLMPromptStudio:
             messages.extend(hist[-keep_msgs:])
         messages.append({"role": "user", "content": user_content})
 
-        # 6) build the request payload (top-level extras work for LM Studio + vLLM;
-        #    both penalty spellings are sent so each backend picks the one it knows)
+        # 6) build the request payload. Only the OpenAI fields are always sent:
+        #    top_k, min_p and the two penalty spellings are extensions, and a
+        #    server that validates its request body answers 400 on the one it
+        #    does not know. Sending them only when they actually DO something
+        #    keeps a strict backend happy without costing anything - a neutral
+        #    value is a no-op on the backends that accept it anyway.
         payload = {
             "model": resolved_model,
             "messages": messages,
             "temperature": float(temperature),
             "top_p": float(top_p),
-            "top_k": int(top_k),
-            "min_p": float(min_p),
-            "repetition_penalty": float(repeat_penalty),  # vLLM / many backends
-            "repeat_penalty": float(repeat_penalty),       # LM Studio (llama.cpp)
             "max_tokens": int(max_tokens),
             "seed": int(seed),
             "stream": False,
         }
+        if int(top_k) > 0:
+            payload["top_k"] = int(top_k)
+        if float(min_p) > 0.0:
+            payload["min_p"] = float(min_p)
+        if abs(float(repeat_penalty) - 1.0) > 1e-9:
+            payload["repetition_penalty"] = float(repeat_penalty)  # vLLM & co
+            payload["repeat_penalty"] = float(repeat_penalty)      # llama.cpp
         if extra_template_kwargs is not None:
             # vLLM/SGLang pass this through to the chat template: enable_thinking
             # for Qwen3.x and GLM, thinking for DeepSeek V3.1+. A template simply
@@ -863,17 +909,12 @@ class LLMPromptStudio:
 
         url = _endpoint(base_url, "/chat/completions")
 
-        # 7) call the server
+        # 7) call the server, retrying once without the extension fields
         try:
-            result = _http_post_json(url, payload, api_key, timeout)
-        except urllib.error.HTTPError as e:
-            try:
-                body = e.read().decode("utf-8")
-            except Exception:
-                body = ""
-            msg = "[LLM HTTP ERROR %s] %s\n%s" % (e.code, url, body)
-            print(msg)
-            return _ui_result(msg, msg)
+            result, err = _post_chat(url, payload, api_key, timeout)
+            if err:
+                print(err)
+                return _ui_result(err, err)
         except Exception as e:
             msg = "[LLM ERROR] %s\nURL: %s\n%s" % (e, url, traceback.format_exc())
             print(msg)
