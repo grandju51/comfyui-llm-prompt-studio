@@ -68,35 +68,52 @@ function boxHeights(node) {
 
 function makeResizable(node, w) {
     try {
-        const el = w?.inputEl || w?.element;
+        // .element is the textarea itself (no wrapper); .inputEl is its
+        // deprecated alias, kept only for older frontends.
+        const el = w?.element || w?.inputEl;
         if (!el || el.tagName !== "TEXTAREA" || el.dataset.cocoResize) return;
         el.dataset.cocoResize = "1";
         el.style.resize = "vertical";
         el.style.overflowY = "auto";
         el.style.minHeight = MIN_BOX_HEIGHT + "px";
 
-        const saved = boxHeights(node)[w.name];
-        if (saved) w._cocoHeight = saved;
+        // A DOM widget is laid out through computeLayoutSize, which reads these
+        // two options; a legacy canvas widget goes through computeSize instead.
+        // Only ever answer once the user has actually dragged: claiming a height
+        // before that takes the box out of the frontend's own distribution and
+        // the node ends up shorter than its widgets - they then overlap whatever
+        // sits below. Hence the `|| fall through` in every branch.
+        w.options = w.options || {};
+        const origMin = w.options.getMinHeight?.bind(w.options);
+        const origMax = w.options.getMaxHeight?.bind(w.options);
+        w.options.getMinHeight = () => w._cocoHeight || origMin?.();
+        w.options.getMaxHeight = () => w._cocoHeight || origMax?.();
+        if (typeof w.computeSize === "function") {
+            const origSize = w.computeSize.bind(w);
+            w.computeSize = (width) =>
+                w._cocoHeight ? [width, w._cocoHeight] : origSize(width);
+        }
 
-        const orig = w.computeSize?.bind(w);
-        w.computeSize = function (width) {
-            if (!w._cocoHeight) return orig ? orig(width) : [width, MIN_BOX_HEIGHT];
-            return [width, w._cocoHeight];
-        };
-
-        // The relayout we trigger resizes the element right back, which fires
-        // the observer again: compare against the last height we caused, or the
-        // two chase each other forever.
-        let applied = w._cocoHeight || 0;
+        // Grow the NODE by exactly what the box gained: asking for its computed
+        // minimum instead would shrink a node the user had made taller. The
+        // relayout resizes the element right back, firing the observer again -
+        // comparing against the last height we caused stops the loop.
+        let last = Math.round(el.offsetHeight);
         new ResizeObserver(() => {
             const h = Math.max(MIN_BOX_HEIGHT, Math.round(el.offsetHeight));
-            if (!h || Math.abs(h - applied) < 2) return;
-            applied = h;
+            if (!h || Math.abs(h - last) < 2) return;
+            const delta = h - last;
+            last = h;
             w._cocoHeight = h;
             boxHeights(node)[w.name] = h;
-            node.setSize([node.size[0], node.computeSize()[1]]);
+            node.setSize([node.size[0], node.size[1] + delta]);
             app.graph.setDirtyCanvas(true, true);
         }).observe(el);
+
+        // Restoring a saved height goes through the same path: setting the style
+        // fires the observer, which applies the delta to the node.
+        const saved = boxHeights(node)[w.name];
+        if (saved && Math.abs(saved - last) >= 2) el.style.height = saved + "px";
     } catch (e) {
         console.warn("[coco] could not make", w?.name, "resizable:", e);
     }
@@ -104,16 +121,7 @@ function makeResizable(node, w) {
 
 // Every multiline box of the node, including ones added later (generated_text).
 function makeAllResizable(node) {
-    let restored = false;
-    for (const w of node.widgets || []) {
-        const had = w._cocoHeight;
-        makeResizable(node, w);
-        if (!had && w._cocoHeight) restored = true;
-    }
-    if (restored) {
-        node.setSize([node.size[0], node.computeSize()[1]]);
-        app.graph.setDirtyCanvas(true, true);
-    }
+    for (const w of node.widgets || []) makeResizable(node, w);
 }
 
 app.registerExtension({
