@@ -648,7 +648,10 @@ class LLMPromptStudio:
                 "min_p": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01,
                     "tooltip": "Min-p sampling: drops tokens below this fraction of the "
                                "top token's probability. 0 = disabled. Try 0.05-0.1 and "
-                               "raise top_p to 1.0 to use min_p alone."}),
+                               "raise top_p to 1.0 to use min_p alone. Does NOT work on a "
+                               "vLLM server started with speculative decoding (draft model "
+                               "/ n-gram): it answers 400 and generates nothing. Leave it "
+                               "at 0 there and filter with top_p / top_k instead."}),
                 "repeat_penalty": ("FLOAT", {"default": 1.1, "min": 0.0, "max": 2.0, "step": 0.01}),
                 "max_tokens": ("INT", {"default": 1024, "min": 16, "max": 32768}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff,

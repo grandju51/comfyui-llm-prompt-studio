@@ -52,10 +52,18 @@ async function detectModel(node) {
 // ComfyUI pins .comfy-multiline-input to `resize: none` AND recomputes the
 // textarea height from the widget layout on every redraw, so showing the
 // browser's handle is only half the job: without the second half the next
-// redraw undoes the drag. computeSize is what the node reads when it lays its
-// widgets out, so feeding the dragged height back into it is what makes the new
-// size stick - and grow the node instead of overflowing it.
+// redraw undoes the drag. options.getMinHeight/getMaxHeight are what a DOM
+// widget's computeLayoutSize reads, so feeding the dragged height back through
+// them is what makes the new size stick - and grows the node instead of
+// overflowing it.
+//
+// The reserved height is NOT the height of the textarea: the frontend draws the
+// widget's box at `computedHeight - 2 * margin` and stretches the element to
+// fill it (h-full). Reporting the raw dragged height therefore leaves the
+// element 2 * margin taller than the box it sits in, and that overflow is
+// exactly what covered the widgets underneath.
 const MIN_BOX_HEIGHT = 60;
+const DEFAULT_WIDGET_MARGIN = 10;
 
 // Heights live in node.properties, which litegraph serializes on its own.
 // Never widgets_values: that array is positional, and one extra entry would
@@ -86,8 +94,11 @@ function makeResizable(node, w) {
         w.options = w.options || {};
         const origMin = w.options.getMinHeight?.bind(w.options);
         const origMax = w.options.getMaxHeight?.bind(w.options);
-        w.options.getMinHeight = () => w._cocoHeight || origMin?.();
-        w.options.getMaxHeight = () => w._cocoHeight || origMax?.();
+        // _cocoBox = what the layout must reserve (margins included);
+        // _cocoHeight = the textarea itself, for the legacy canvas path, which
+        // has no margin to account for.
+        w.options.getMinHeight = () => w._cocoBox || origMin?.();
+        w.options.getMaxHeight = () => w._cocoBox || origMax?.();
         if (typeof w.computeSize === "function") {
             const origSize = w.computeSize.bind(w);
             w.computeSize = (width) =>
@@ -98,13 +109,17 @@ function makeResizable(node, w) {
         // minimum instead would shrink a node the user had made taller. The
         // relayout resizes the element right back, firing the observer again -
         // comparing against the last height we caused stops the loop.
+        const margin = typeof w.margin === "number" ? w.margin : DEFAULT_WIDGET_MARGIN;
         let last = Math.round(el.offsetHeight);
         new ResizeObserver(() => {
             const h = Math.max(MIN_BOX_HEIGHT, Math.round(el.offsetHeight));
             if (!h || Math.abs(h - last) < 2) return;
             const delta = h - last;
             last = h;
+            // + the two margins the frontend subtracts again when it draws the
+            // box, so the box ends up exactly as tall as the textarea.
             w._cocoHeight = h;
+            w._cocoBox = h + 2 * margin;
             boxHeights(node)[w.name] = h;
             node.setSize([node.size[0], node.size[1] + delta]);
             app.graph.setDirtyCanvas(true, true);

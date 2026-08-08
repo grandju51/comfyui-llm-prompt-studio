@@ -222,6 +222,12 @@ vllm serve Qwen/Qwen3-8B --port 8000          # add --api-key YOURKEY if you wan
 - **min_p** is sent as a top-level field (supported by LM Studio/llama.cpp and
   vLLM). `0.0` disables it. A common setup is `min_p = 0.05-0.1` with
   `top_p = 1.0` so min-p does the filtering.
+  **It does not work on a vLLM server running speculative decoding** (a draft
+  model or n-gram proposer): vLLM itself refuses it with
+  `The min_p and logit_bias sampling parameters are not yet supported with
+  speculative decoding` and generates nothing. That is a property of how the
+  server was launched, not of the model — either restart vLLM without the
+  speculative config, or leave `min_p = 0` and filter with `top_p` / `top_k`.
 - **top_k / repeat_penalty** are sent as top-level fields. Both
   `repetition_penalty` (vLLM) and `repeat_penalty` (LM Studio/llama.cpp) are
   included so each backend uses the one it understands.
