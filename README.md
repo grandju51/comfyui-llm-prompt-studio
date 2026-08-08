@@ -237,6 +237,13 @@ vllm serve Qwen/Qwen3-8B --port 8000          # add --api-key YOURKEY if you wan
   the first frame, `<Picture 2>` the last one"*.
 - **Model presets are editable defaults** — tweak them in the box, or edit the
   source defaults in `prompt_templates.py`.
+- **Resizable text boxes** — drag the bottom-right corner of `global_directives`,
+  `system_prompt`, `user_prompt` or the result preview to give each one the
+  height it deserves; the node grows to match and the heights are saved with the
+  workflow. (They live in the node's `properties`, never in `widgets_values`,
+  which is positional.) ComfyUI ships those textareas with `resize: none` and
+  recomputes their height on every redraw, so the extension both restores the
+  handle and feeds the dragged height back into the widget layout.
 
 ---
 

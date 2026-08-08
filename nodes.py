@@ -430,7 +430,13 @@ def _video_manifest(connected: bool, role: str, sent: int, total: int,
             "happens between them: describe only what is visible ON the frames, "
             "and never narrate an action, a cut or a sound you did not see. They "
             "are frames of ONE video, not separate reference pictures - never call "
-            "them <Picture N>." % (sent, sent, span))
+            "them <Picture N>. These frames are your EVIDENCE, never your "
+            "vocabulary: they exist only inside this request, the generator "
+            "receives the whole video and knows nothing of your sample. So never "
+            "write \"frame N\", never state a frame count or a total, and never put "
+            "a \"<Video 1> frame N of M\" label in your output - name the video "
+            "<Video 1> and a moment in it by its timestamp or by what happens "
+            "there." % (sent, sent, span))
     elif connected:
         seen = ("No frame was sampled from it (the frame count is set to 0), so you "
                 "have NOT seen it. Never describe its content: designate it as "

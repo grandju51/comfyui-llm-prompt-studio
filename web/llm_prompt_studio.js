@@ -48,6 +48,74 @@ async function detectModel(node) {
     }
 }
 
+// ------------------------------------------------------------- resizable boxes
+// ComfyUI pins .comfy-multiline-input to `resize: none` AND recomputes the
+// textarea height from the widget layout on every redraw, so showing the
+// browser's handle is only half the job: without the second half the next
+// redraw undoes the drag. computeSize is what the node reads when it lays its
+// widgets out, so feeding the dragged height back into it is what makes the new
+// size stick - and grow the node instead of overflowing it.
+const MIN_BOX_HEIGHT = 60;
+
+// Heights live in node.properties, which litegraph serializes on its own.
+// Never widgets_values: that array is positional, and one extra entry would
+// shift every saved workflow by a slot.
+function boxHeights(node) {
+    if (!node.properties) node.properties = {};
+    if (!node.properties.boxHeights) node.properties.boxHeights = {};
+    return node.properties.boxHeights;
+}
+
+function makeResizable(node, w) {
+    try {
+        const el = w?.inputEl || w?.element;
+        if (!el || el.tagName !== "TEXTAREA" || el.dataset.cocoResize) return;
+        el.dataset.cocoResize = "1";
+        el.style.resize = "vertical";
+        el.style.overflowY = "auto";
+        el.style.minHeight = MIN_BOX_HEIGHT + "px";
+
+        const saved = boxHeights(node)[w.name];
+        if (saved) w._cocoHeight = saved;
+
+        const orig = w.computeSize?.bind(w);
+        w.computeSize = function (width) {
+            if (!w._cocoHeight) return orig ? orig(width) : [width, MIN_BOX_HEIGHT];
+            return [width, w._cocoHeight];
+        };
+
+        // The relayout we trigger resizes the element right back, which fires
+        // the observer again: compare against the last height we caused, or the
+        // two chase each other forever.
+        let applied = w._cocoHeight || 0;
+        new ResizeObserver(() => {
+            const h = Math.max(MIN_BOX_HEIGHT, Math.round(el.offsetHeight));
+            if (!h || Math.abs(h - applied) < 2) return;
+            applied = h;
+            w._cocoHeight = h;
+            boxHeights(node)[w.name] = h;
+            node.setSize([node.size[0], node.computeSize()[1]]);
+            app.graph.setDirtyCanvas(true, true);
+        }).observe(el);
+    } catch (e) {
+        console.warn("[coco] could not make", w?.name, "resizable:", e);
+    }
+}
+
+// Every multiline box of the node, including ones added later (generated_text).
+function makeAllResizable(node) {
+    let restored = false;
+    for (const w of node.widgets || []) {
+        const had = w._cocoHeight;
+        makeResizable(node, w);
+        if (!had && w._cocoHeight) restored = true;
+    }
+    if (restored) {
+        node.setSize([node.size[0], node.computeSize()[1]]);
+        app.graph.setDirtyCanvas(true, true);
+    }
+}
+
 app.registerExtension({
     name: "comfy.LLMPromptStudio",
     async setup() {
@@ -111,6 +179,8 @@ app.registerExtension({
                 if (sw && (!sw.value || !sw.value.trim())) applyTemplate();
                 const mw = getWidget(node, "model");
                 if (mw && (!mw.value || !mw.value.trim())) detectModel(node);
+                // After configure(), so a saved workflow's box heights are back.
+                makeAllResizable(node);
             }, 250);
 
             return ret;
@@ -140,6 +210,7 @@ app.registerExtension({
                 }
             }
             w.value = value;
+            makeResizable(node, w);
             app.graph.setDirtyCanvas(true, true);
         };
     },
