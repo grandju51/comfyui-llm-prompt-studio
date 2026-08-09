@@ -294,5 +294,42 @@ class LLMTextTokenPreview:
         }
 
 
-NODE_CLASS_MAPPINGS = {"LLMTextTokenPreview": LLMTextTokenPreview}
-NODE_DISPLAY_NAME_MAPPINGS = {"LLMTextTokenPreview": "Text Preview + Token Count"}
+class LLMTokenCount:
+    """Just the number. No tokenizer to pick, nothing to install, nothing to
+    connect: the count is the arithmetic estimate, within ~15%."""
+
+    CATEGORY = "LLM Prompt Studio"
+    FUNCTION = "count"
+    OUTPUT_NODE = True
+    RETURN_TYPES = ("STRING", "INT")
+    RETURN_NAMES = ("text", "tokens")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text": ("STRING", {
+                    "multiline": True,
+                    "default": "",
+                    "tooltip": "The text to measure. Connect a STRING output here, "
+                               "or type into the box.",
+                }),
+            },
+        }
+
+    def count(self, text):
+        text = "" if text is None else str(text)
+        n = _estimate_tokens(text)
+        info = "~%d %s" % (n, "token" if n == 1 else "tokens")
+        # No "text" in the ui payload: this node shows the count only.
+        return {"ui": {"info": [info]}, "result": (text, n)}
+
+
+NODE_CLASS_MAPPINGS = {
+    "LLMTextTokenPreview": LLMTextTokenPreview,
+    "LLMTokenCount": LLMTokenCount,
+}
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "LLMTextTokenPreview": "Text Preview + Token Count",
+    "LLMTokenCount": "Token Count (simple)",
+}

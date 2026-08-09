@@ -3,7 +3,9 @@ import { api } from "../../scripts/api.js";
 import { ComfyWidgets } from "../../scripts/widgets.js";
 
 const NODE_NAME = "LLMPromptStudio";
-const PREVIEW_NODE = "LLMTextTokenPreview";
+// Both draw whatever the run sent back: the count alone for the simple one,
+// the count plus the text it counted for the other.
+const PREVIEW_NODES = new Set(["LLMTextTokenPreview", "LLMTokenCount"]);
 let TEMPLATES = {};
 
 async function loadTemplates() {
@@ -168,7 +170,7 @@ app.registerExtension({
         await loadTemplates();
     },
     async beforeRegisterNodeDef(nodeType, nodeData) {
-        if (nodeData.name === PREVIEW_NODE) {
+        if (PREVIEW_NODES.has(nodeData.name)) {
             // Token count first, then the text it counted. Both boxes are
             // rebuilt from the run's result, never from widgets_values.
             const onExec = nodeType.prototype.onExecuted;

@@ -205,6 +205,16 @@ itself (by tokenizing an empty string) rather than hard-coded per flavour.
 
 ---
 
+## Fourth node: `Token Count (simple)`
+
+The same estimate, stripped of everything else: a text in, `~123 tokens` on
+the node. No dropdown, no CLIP to connect, nothing to install. Outputs `text`
+(passthrough) and `tokens` (INT).
+
+Take this one unless you specifically need an exact count.
+
+---
+
 ## Install
 
 1. Copy the **`comfyui-llm-prompt-studio`** folder into
