@@ -3,6 +3,7 @@ import { api } from "../../scripts/api.js";
 import { ComfyWidgets } from "../../scripts/widgets.js";
 
 const NODE_NAME = "LLMPromptStudio";
+const PREVIEW_NODE = "LLMTextTokenPreview";
 let TEMPLATES = {};
 
 async function loadTemplates() {
@@ -139,12 +140,78 @@ function makeAllResizable(node) {
     for (const w of node.widgets || []) makeResizable(node, w);
 }
 
+// A display-only text box added at run time. serialize:false so it never lands
+// in widgets_values, which is positional: one extra entry there would shift
+// every saved workflow by a slot.
+function readonlyBox(node, name) {
+    let w = node.widgets?.find((x) => x.name === name);
+    if (!w) {
+        w = ComfyWidgets["STRING"](
+            node,
+            name,
+            ["STRING", { multiline: true }],
+            app
+        ).widget;
+        w.serialize = false;
+        const el = w.element || w.inputEl;
+        if (el) {
+            el.readOnly = true;
+            el.style.opacity = "0.85";
+        }
+    }
+    return w;
+}
+
 app.registerExtension({
     name: "comfy.LLMPromptStudio",
     async setup() {
         await loadTemplates();
     },
     async beforeRegisterNodeDef(nodeType, nodeData) {
+        if (nodeData.name === PREVIEW_NODE) {
+            // Token count first, then the text it counted. Both boxes are
+            // rebuilt from the run's result, never from widgets_values.
+            const onExec = nodeType.prototype.onExecuted;
+            nodeType.prototype.onExecuted = function (message) {
+                onExec?.apply(this, arguments);
+                const node = this;
+                const join = (v) =>
+                    v === undefined || v === null
+                        ? null
+                        : Array.isArray(v)
+                        ? v.join("")
+                        : String(v);
+
+                const info = join(message?.info);
+                if (info !== null) {
+                    const w = readonlyBox(node, "token_count");
+                    w.value = info;
+                    const el = w.element || w.inputEl;
+                    // Over budget is the one thing worth spotting without reading.
+                    if (el) el.style.color = info.includes("OVER") ? "#ff6b6b" : "";
+                    makeResizable(node, w);
+                }
+
+                const text = join(message?.text);
+                if (text !== null) {
+                    const w = readonlyBox(node, "preview_text");
+                    w.value = text;
+                    makeResizable(node, w);
+                }
+                app.graph.setDirtyCanvas(true, true);
+            };
+
+            // A saved workflow reopens with the boxes gone (serialize:false), so
+            // the node must not keep the height they had reserved.
+            const onConfigure = nodeType.prototype.onConfigure;
+            nodeType.prototype.onConfigure = function () {
+                const r = onConfigure?.apply(this, arguments);
+                setTimeout(() => makeAllResizable(this), 250);
+                return r;
+            };
+            return;
+        }
+
         if (nodeData.name !== NODE_NAME) return;
 
         const onNodeCreated = nodeType.prototype.onNodeCreated;

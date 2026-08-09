@@ -20,9 +20,15 @@ from .nodes import (
     _pick_chat_model,
 )
 from .prompt_templates import TEMPLATES, LEGACY_NAMES
+from .text_preview import (
+    NODE_CLASS_MAPPINGS as _PREVIEW_CLASSES,
+    NODE_DISPLAY_NAME_MAPPINGS as _PREVIEW_NAMES,
+)
 
 NODE_CLASS_MAPPINGS.update(_CIVITAI_CLASSES)
 NODE_DISPLAY_NAME_MAPPINGS.update(_CIVITAI_NAMES)
+NODE_CLASS_MAPPINGS.update(_PREVIEW_CLASSES)
+NODE_DISPLAY_NAME_MAPPINGS.update(_PREVIEW_NAMES)
 
 # Tell ComfyUI where the front-end JS lives.
 WEB_DIRECTORY = "./web"

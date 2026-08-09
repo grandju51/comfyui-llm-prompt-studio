@@ -174,6 +174,37 @@ workflows with no sampler.
 
 ---
 
+## Third node: `Text Preview + Token Count`
+
+Shows a text on the node — like any preview node — and tells you **how many
+tokens it is**. Outputs: `text` (passthrough), `tokens` (INT), `report`
+(STRING).
+
+Four ways to count, picked with the `tokenizer` dropdown:
+
+| Mode | Needs | Good for |
+|------|-------|----------|
+| **estimate** | nothing | a number right now, within ~15% |
+| **CLIP (connected)** | a `CLIP` link | the *exact* count your image model sees |
+| **tiktoken** | `pip install tiktoken` | OpenAI-style budgeting (o200k / cl100k) |
+| **LLM server /tokenize** | a vLLM server | the exact count for the model that will read the prompt |
+
+`auto` takes the connected CLIP if there is one, else tiktoken if it is
+installed, else the estimate. Anything that fails (no tiktoken, server down)
+falls back to the estimate and says so in the report instead of erroring out.
+
+**`token_limit`** turns the count into a budget: the report says how many
+tokens are left, or how far over you are — in red. `0` disables it. Use `75`
+for a CLIP chunk. When counting through CLIP, going past 75 also prints how
+many chunks the encoder will split the prompt into, which is the thing that
+quietly weakens a long prompt.
+
+The CLIP count works out of the box on CLIP-L, CLIP-G, T5 and anything added
+later: the padding and the start/end markers are measured from the encoder
+itself (by tokenizing an empty string) rather than hard-coded per flavour.
+
+---
+
 ## Install
 
 1. Copy the **`comfyui-llm-prompt-studio`** folder into
