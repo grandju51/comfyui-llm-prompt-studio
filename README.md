@@ -29,7 +29,8 @@ generic preset.
   into `system_prompt` and stays **fully editable**. (Leave `system_prompt`
   empty to always use the current preset.)
 - **Sampling controls**: `temperature`, `top_p`, `top_k`, `min_p`,
-  `repeat_penalty`, `seed` (with `control_after_generate`).
+  `repeat_penalty`, `seed` (with `control_after_generate`). `min_p` and the
+  repetition penalty each have their own on/off switch.
 - **Output tokens**: `max_tokens` caps the length of the generated answer.
 - **Thinking control** (`auto` / `off` / `on`): `off` states "no thinking" in
   every dialect at once — `/no_think` + `enable_thinking=false` (**Qwen3.x**,
@@ -268,7 +269,8 @@ vllm serve Qwen/Qwen3-8B --port 8000          # add --api-key YOURKEY if you wan
   `The min_p and logit_bias sampling parameters are not yet supported with
   speculative decoding` and generates nothing. That is a property of how the
   server was launched, not of the model — either restart vLLM without the
-  speculative config, or leave `min_p = 0` and filter with `top_p` / `top_k`.
+  speculative config, or turn `enable_min_p` off and filter with `top_p` /
+  `top_k`.
 - **top_k / repeat_penalty** are sent as top-level fields. Both
   `repetition_penalty` (vLLM) and `repeat_penalty` (LM Studio/llama.cpp) are
   included so each backend uses the one it understands.
@@ -277,7 +279,11 @@ vllm serve Qwen/Qwen3-8B --port 8000          # add --api-key YOURKEY if you wan
   backend that validates its request body answers **400** on the first one it
   doesn't know — generating nothing at all, which looks from ComfyUI like the
   request was simply cancelled. So a neutral value (`top_k = 0`, `min_p = 0`,
-  `repeat_penalty = 1.0`) is left out of the request entirely, and if a 400/422
+  `repeat_penalty = 1.0`) is left out of the request entirely. The two switches
+  at the bottom of the node, **`enable_min_p`** and **`enable_repeat_penalty`**,
+  are the manual override: off means the field is never sent whatever the
+  slider says, so a tuned value can stay parked there while you talk to a
+  backend that refuses it. If a 400/422
   still comes back the node **retries once without every extension** —
   including the thinking switches — and prints exactly what it dropped. You get
   an answer instead of a dead end; the cut tag still strips any reasoning block

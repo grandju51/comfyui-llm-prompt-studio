@@ -650,9 +650,13 @@ class LLMPromptStudio:
                                "top token's probability. 0 = disabled. Try 0.05-0.1 and "
                                "raise top_p to 1.0 to use min_p alone. Does NOT work on a "
                                "vLLM server started with speculative decoding (draft model "
-                               "/ n-gram): it answers 400 and generates nothing. Leave it "
-                               "at 0 there and filter with top_p / top_k instead."}),
-                "repeat_penalty": ("FLOAT", {"default": 1.1, "min": 0.0, "max": 2.0, "step": 0.01}),
+                               "/ n-gram): it answers 400 and generates nothing. Turn "
+                               "enable_min_p off there (it keeps your value) and filter "
+                               "with top_p / top_k instead."}),
+                "repeat_penalty": ("FLOAT", {"default": 1.1, "min": 0.0, "max": 2.0, "step": 0.01,
+                    "tooltip": "Penalises tokens already produced. 1.0 = neutral and "
+                               "nothing is sent; enable_repeat_penalty (bottom of the "
+                               "node) switches it off without touching this value."}),
                 "max_tokens": ("INT", {"default": 1024, "min": 16, "max": 32768}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff,
                                  "control_after_generate": True}),
@@ -771,6 +775,21 @@ class LLMPromptStudio:
                        "even with nothing wired into the video socket - what you "
                        "want when the clip goes straight to the video model further "
                        "down the graph."})
+        # Also kept last for the positional reason above, which is why these two
+        # switches sit here instead of next to the sliders they command.
+        optional["enable_min_p"] = ("BOOLEAN", {"default": True,
+            "label_on": "min_p: on", "label_off": "min_p: off",
+            "tooltip": "Master switch for min_p. Off = the field is NEVER sent, "
+                       "whatever the slider says, so you can park a value there "
+                       "and still talk to a backend that rejects it (a vLLM "
+                       "server with speculative decoding answers 400 on it). On = "
+                       "sent as soon as the slider is above 0."})
+        optional["enable_repeat_penalty"] = ("BOOLEAN", {"default": True,
+            "label_on": "repeat penalty: on", "label_off": "repeat penalty: off",
+            "tooltip": "Master switch for the repetition penalty. Off = neither "
+                       "repetition_penalty (vLLM) nor repeat_penalty (llama.cpp) "
+                       "is sent, whatever the slider says. On = sent as soon as "
+                       "the slider leaves 1.0, which is the neutral value."})
         return spec
 
     # Always re-run when the seed changes (control_after_generate); fixed seed = cached.
@@ -788,7 +807,8 @@ class LLMPromptStudio:
                  audio=None, audio_role=AUDIO_ROLES[0], video=None,
                  video_stride=4, video_max_frames=8,
                  video_frame_size=VIDEO_FRAME_SIZES[0], video_fps=0.0,
-                 video_role=VIDEO_ROLES[0], **pictures):
+                 video_role=VIDEO_ROLES[0], enable_min_p=True,
+                 enable_repeat_penalty=True, **pictures):
 
         # 1) encode the connected images first: how many there are is a fact the
         #    system prompt has to state, otherwise the model reads <Picture 3> in
@@ -885,7 +905,10 @@ class LLMPromptStudio:
         #    server that validates its request body answers 400 on the one it
         #    does not know. Sending them only when they actually DO something
         #    keeps a strict backend happy without costing anything - a neutral
-        #    value is a no-op on the backends that accept it anyway.
+        #    value is a no-op on the backends that accept it anyway. The two
+        #    enable_* switches are the manual override of that rule: off means
+        #    never sent, so a tuned value can stay on the slider while the field
+        #    itself is kept out of a request the backend would refuse.
         payload = {
             "model": resolved_model,
             "messages": messages,
@@ -897,9 +920,9 @@ class LLMPromptStudio:
         }
         if int(top_k) > 0:
             payload["top_k"] = int(top_k)
-        if float(min_p) > 0.0:
+        if enable_min_p and float(min_p) > 0.0:
             payload["min_p"] = float(min_p)
-        if abs(float(repeat_penalty) - 1.0) > 1e-9:
+        if enable_repeat_penalty and abs(float(repeat_penalty) - 1.0) > 1e-9:
             payload["repetition_penalty"] = float(repeat_penalty)  # vLLM & co
             payload["repeat_penalty"] = float(repeat_penalty)      # llama.cpp
         if extra_template_kwargs is not None:
