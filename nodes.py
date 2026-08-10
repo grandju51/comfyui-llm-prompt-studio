@@ -391,6 +391,18 @@ _EXTENSION_FIELDS = ("top_k", "min_p", "repetition_penalty", "repeat_penalty",
                      "chat_template_kwargs", "thinking")
 
 
+def _carried_error(result) -> str:
+    """The error text a 200 response carries instead of a completion, if any."""
+    if not isinstance(result, dict) or "choices" in result:
+        return ""
+    err = result.get("error")
+    if not err:
+        return ""
+    if isinstance(err, dict):
+        err = err.get("message") or json.dumps(err)
+    return str(err)
+
+
 def _post_chat(url: str, payload: dict, api_key: str, timeout: int):
     """POST the request, retrying once without the extension fields.
 
@@ -408,7 +420,16 @@ def _post_chat(url: str, payload: dict, api_key: str, timeout: int):
             return ""
 
     try:
-        return _http_post_json(url, payload, api_key, timeout), None
+        res = _http_post_json(url, payload, api_key, timeout)
+        carried = _carried_error(res)
+        if carried:
+            return None, ("[LLM ERROR] %s answered 200 with an error instead of a "
+                          "completion:\n%s\n\nA server that does not serve that "
+                          "address answers exactly this - check base_url: LM "
+                          "Studio's OpenAI API is http://localhost:1234/v1, and "
+                          "/api/v1 is its own API, which has no /chat/completions."
+                          % (url, carried))
+        return res, None
     except urllib.error.HTTPError as e:
         first = "[LLM HTTP ERROR %s] %s\n%s" % (e.code, url, _body(e))
         stripped = {k: v for k, v in payload.items() if k not in _EXTENSION_FIELDS}
