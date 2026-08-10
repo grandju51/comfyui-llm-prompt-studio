@@ -135,6 +135,26 @@ generic preset.
   then died is exactly the one still sitting on the memory you need. Leave it
   **off** while you iterate on a prompt — reloading costs several seconds (or
   minutes, on a big model) on every run.
+- **`context_length` + `context_slots`** (LM Studio only, `0` = leave its own
+  settings alone): how much memory the model books when the node loads it. This
+  is the VRAM knob, and it is **not** the prompt size — LM Studio reserves
+  `context_length` tokens **per slot**, so what a model really books is
+  `context_length × context_slots`, sitting **next to** the weights:
+
+  ```
+  srv load_model: initializing, n_slots = 4, n_ctx_slot = 60416
+  → 241 664 tokens reserved, + 17 GB of weights, on a 24 GB card
+  ```
+
+  That card then runs out **in the middle of a prompt**, and the engine does not
+  fail gracefully — it aborts. You get `Error: Channel Error` in the LM Studio
+  log and `{"error":"terminated"}` (then `Engine protocol predict request
+  failed`) in the node. Setting `context_length` to what a prompt actually needs
+  (a picture + a few turns of history fits in ~8k) and `context_slots` to `1`
+  (ComfyUI sends one request at a time; the usual default of 4 quadruples the
+  reservation for nothing) is what stops it. The size is **fixed when the model
+  loads**, so a copy already in memory at another size is unloaded and loaded
+  again — the node says so in the console.
 
 Outputs:
 - `prompt` – the cleaned text (after the cut tag, **no thinking**). It is a

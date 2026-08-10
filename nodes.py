@@ -287,11 +287,13 @@ def _server_root(base_url: str) -> str:
 
 
 def _loaded_instances(root: str, api_key: str, model: str, timeout: int):
-    """Instance ids LM Studio currently holds in memory for ``model``.
+    """(instance id, config) pairs LM Studio currently holds for ``model``.
 
     An instance id is usually the model key itself, but the same model loaded
     twice gets one entry per copy - and unloading takes ids, not names, so the
-    list is what has to be walked to really empty the VRAM.
+    list is what has to be walked to really empty the VRAM. The config comes
+    along because a copy already in memory was loaded with a context size that
+    may not be the one asked for, and only a reload can change it.
     """
     req = urllib.request.Request(root + "/api/v1/models", method="GET")
     if api_key and api_key.strip():
@@ -299,41 +301,75 @@ def _loaded_instances(root: str, api_key: str, model: str, timeout: int):
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     wanted = (model or "").strip().lower()
-    ids = []
+    found = []
     for m in (data.get("models") if isinstance(data, dict) else None) or []:
         key = str(m.get("key") or "").strip().lower()
         for inst in m.get("loaded_instances") or []:
-            iid = inst.get("id") if isinstance(inst, dict) else inst
+            if isinstance(inst, dict):
+                iid, cfg = inst.get("id"), inst.get("config") or {}
+            else:
+                iid, cfg = inst, {}
             if not iid:
                 continue
             if key == wanted or str(iid).strip().lower() == wanted:
-                ids.append(iid)
-    return ids
+                found.append((iid, cfg))
+    return found
 
 
-def _load_model(base_url: str, api_key: str, model: str, timeout: int = 300):
-    """Put ``model`` in memory before the request, if it is not there already.
+def _wrong_size(cfg: dict, context_length: int, parallel: int) -> str:
+    """Why a copy already in memory does not match the asked-for size, if so.
+
+    LM Studio reserves ``context_length`` tokens PER slot, so what a model
+    really books is context_length x parallel - 60416 x 4 = 241664 tokens next
+    to a 17 GB model is what makes a 24 GB card run out mid-prompt. Neither can
+    be changed on a live instance, so a mismatch has to be reported here for
+    the caller to reload.
+    """
+    if context_length > 0 and int(cfg.get("context_length") or 0) != context_length:
+        return "context_length %s -> %d" % (cfg.get("context_length"), context_length)
+    if parallel > 0 and int(cfg.get("parallel") or 0) != parallel:
+        return "parallel %s -> %d" % (cfg.get("parallel"), parallel)
+    return ""
+
+
+def _load_model(base_url: str, api_key: str, model: str, timeout: int = 300,
+                context_length: int = 0, parallel: int = 0):
+    """Put ``model`` in memory before the request, at the asked-for size.
 
     LM Studio loads a model on its own when a request names one (JIT), so this
     is only the explicit half of the load -> prompt -> unload cycle: it makes
     the run work with JIT turned off, and it gives the loading time its own line
     in the log instead of hiding it inside the chat timeout. Asking twice is NOT
     free - a second load builds a SECOND instance ('model:2') and costs the VRAM
-    twice - hence the lookup first. Failure is never fatal: the chat request
+    twice - hence the lookup first. A copy already there but loaded at another
+    size is dropped and loaded again, because that size is fixed at load time
+    and is the whole point of asking. Failure is never fatal: the chat request
     that follows falls back to whatever the server does by itself.
     """
     root = _server_root(base_url)
     try:
-        if _loaded_instances(root, api_key, model, min(timeout, 15)):
-            return
+        live = _loaded_instances(root, api_key, model, min(timeout, 15))
     except Exception as e:
         print("[LLMPromptStudio] load: could not list the loaded models (%s)" % e)
         return
+    if live:
+        mismatch = _wrong_size(live[0][1], context_length, parallel)
+        if not mismatch:
+            return
+        print("[LLMPromptStudio] '%s' is loaded with %s; reloading it"
+              % (live[0][0], mismatch))
+        _unload_model(base_url, api_key, model, min(timeout, 60))
+    body = {"model": model}
+    if context_length > 0:
+        body["context_length"] = context_length
+    if parallel > 0:
+        body["parallel"] = parallel
     try:
-        res = _http_post_json(root + "/api/v1/models/load", {"model": model},
-                              api_key, timeout)
-        print("[LLMPromptStudio] loaded '%s' in %ss"
-              % (res.get("instance_id", model), res.get("load_time_seconds", "?")))
+        res = _http_post_json(root + "/api/v1/models/load", body, api_key, timeout)
+        print("[LLMPromptStudio] loaded '%s' in %ss%s"
+              % (res.get("instance_id", model), res.get("load_time_seconds", "?"),
+                 (" (context %d x %d slot(s))" % (context_length, parallel or 1))
+                 if context_length > 0 else ""))
     except urllib.error.HTTPError as e:
         try:
             body = e.read().decode("utf-8")
@@ -362,8 +398,7 @@ def _unload_model(base_url: str, api_key: str, model: str, timeout: int = 60):
         # let the server be the judge of whether it is loaded.
         print("[LLMPromptStudio] unload: could not list the loaded models (%s)" % e)
         targets = []
-    if not targets:
-        targets = [model]
+    targets = [iid for iid, _cfg in targets] or [model]
     for iid in targets:
         try:
             _http_post_json(url, {"instance_id": iid}, api_key, timeout)
@@ -939,6 +974,25 @@ class LLMPromptStudio:
                        "base_url you typed. The next run loads the model again, so "
                        "leave it off while you iterate on a prompt: reloading costs "
                        "several seconds per run."})
+        optional["context_length"] = ("INT", {"default": 0, "min": 0, "max": 1048576,
+            "step": 1024,
+            "tooltip": "LM Studio only: how many tokens the model reserves when the "
+                       "node loads it. 0 = leave LM Studio's own setting alone. This "
+                       "is the VRAM knob: the reservation is context_length x "
+                       "context_slots and it sits NEXT to the weights, so a 17 GB "
+                       "model asking 60k x 4 tokens runs a 24 GB card out of memory "
+                       "in the middle of a prompt ('Channel Error' in the LM Studio "
+                       "log, {\"error\":\"terminated\"} here). A prompt with a picture "
+                       "and a few turns of history fits in ~8k. The size is fixed "
+                       "when the model loads, so a copy already in memory at another "
+                       "size is unloaded and loaded again."})
+        optional["context_slots"] = ("INT", {"default": 0, "min": 0, "max": 64,
+            "tooltip": "LM Studio only: how many requests it keeps room for in "
+                       "parallel ('parallel'), each one costing a full "
+                       "context_length. 0 = leave its own setting alone. ComfyUI "
+                       "sends one request at a time, so 1 divides the reservation "
+                       "by whatever LM Studio had picked - by 4, with its usual "
+                       "default. Works on its own or next to context_length."})
         return spec
 
     # Always re-run when the seed changes (control_after_generate); fixed seed = cached.
@@ -957,7 +1011,8 @@ class LLMPromptStudio:
                  video_stride=4, video_max_frames=8,
                  video_frame_size=VIDEO_FRAME_SIZES[0], video_fps=0.0,
                  video_role=VIDEO_ROLES[0], enable_min_p=True,
-                 enable_repeat_penalty=True, unload_after=False, **pictures):
+                 enable_repeat_penalty=True, unload_after=False,
+                 context_length=0, context_slots=0, **pictures):
 
         # 1) encode the connected images first: how many there are is a fact the
         #    system prompt has to state, otherwise the model reads <Picture 3> in
@@ -1086,10 +1141,13 @@ class LLMPromptStudio:
 
         # 6bis) load -> prompt -> unload: when the model is to be dropped after
         #    the run it also has to be there before it, so the pair is explicit.
-        #    Loading a big model can take minutes, far more than a chat timeout
-        #    sized for generation, hence the floor of 5 minutes.
-        if unload_after:
-            _load_model(base_url, api_key, resolved_model, max(int(timeout), 300))
+        #    A context size is asked for here too, since it can only be chosen
+        #    while loading. Loading a big model can take minutes, far more than
+        #    a chat timeout sized for generation, hence the floor of 5 minutes.
+        ctx_len, ctx_slots = max(0, int(context_length)), max(0, int(context_slots))
+        if unload_after or ctx_len or ctx_slots:
+            _load_model(base_url, api_key, resolved_model, max(int(timeout), 300),
+                        ctx_len, ctx_slots)
 
         # 7) call the server, retrying once without the extension fields
         try:
