@@ -121,6 +121,20 @@ generic preset.
   `px` presets cap the longest side. Images already smaller than the target are
   never upscaled. It applies to every connected socket, which matters once you
   send 5–8 of them.
+- **`unload_after`** (LM Studio only, off by default): turns the run into a full
+  **load → prompt → unload** cycle. The model is put in memory before the
+  request (only if it isn't there already — asking twice would build a *second*
+  instance and cost the VRAM twice) and dropped from it as soon as the answer is
+  in, so the Flux/SDXL/Wan model further down the graph gets the VRAM back.
+  It uses LM Studio's own API, which lives next to the `base_url` you typed
+  (`http://localhost:1234/v1` → `POST http://localhost:1234/api/v1/models/unload`
+  with `{"instance_id": …}`), so an **LM Studio 0.3.30+** is required — an older
+  build or a vLLM server answers `404` and the node just prints a line, the
+  prompt is never affected. Every instance of that model is unloaded, and the
+  unload also happens when the request **fails**: a model loaded by a run that
+  then died is exactly the one still sitting on the memory you need. Leave it
+  **off** while you iterate on a prompt — reloading costs several seconds (or
+  minutes, on a big model) on every run.
 
 Outputs:
 - `prompt` – the cleaned text (after the cut tag, **no thinking**). It is a

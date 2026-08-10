@@ -21,6 +21,9 @@ Features
 - A video input sampled into frames (1 out of N, capped, spread over the whole
   clip) so the model describes a video it has actually seen, plus audio/video
   role widgets declaring what each asset is FOR when it cannot be shown.
+- Optional load -> prompt -> unload cycle (unload_after): LM Studio is told to
+  drop the model from memory once the answer is in, so the image/video model
+  further down the graph gets the VRAM back.
 """
 
 import base64
@@ -264,6 +267,122 @@ def _no_think_model(base_url: str, api_key: str, model: str, override: str,
     print("[LLMPromptStudio] no think: %s has no '%s' alias, using flags only"
           % (base_url, _DEEPSEEK_NO_THINK_ALIAS))
     return model
+
+
+# LM Studio serves two APIs side by side: /v1 is the OpenAI-compatible surface
+# this node talks to, /api/v1 its own one - and only the native one can free the
+# memory. Both hang off the same root, so the unload address is the base_url
+# with its API suffix cut off. Longest suffix first: "/openai/v1" also ends
+# with "/v1" and cutting the short one would leave a dead ".../openai" root.
+_API_SUFFIXES = ("/openai/v1", "/api/v1", "/api/v0", "/v1")
+
+
+def _server_root(base_url: str) -> str:
+    root = (base_url or "").strip().rstrip("/")
+    low = root.lower()
+    for suffix in _API_SUFFIXES:
+        if low.endswith(suffix):
+            return root[: -len(suffix)]
+    return root
+
+
+def _loaded_instances(root: str, api_key: str, model: str, timeout: int):
+    """Instance ids LM Studio currently holds in memory for ``model``.
+
+    An instance id is usually the model key itself, but the same model loaded
+    twice gets one entry per copy - and unloading takes ids, not names, so the
+    list is what has to be walked to really empty the VRAM.
+    """
+    req = urllib.request.Request(root + "/api/v1/models", method="GET")
+    if api_key and api_key.strip():
+        req.add_header("Authorization", "Bearer " + api_key.strip())
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    wanted = (model or "").strip().lower()
+    ids = []
+    for m in (data.get("models") if isinstance(data, dict) else None) or []:
+        key = str(m.get("key") or "").strip().lower()
+        for inst in m.get("loaded_instances") or []:
+            iid = inst.get("id") if isinstance(inst, dict) else inst
+            if not iid:
+                continue
+            if key == wanted or str(iid).strip().lower() == wanted:
+                ids.append(iid)
+    return ids
+
+
+def _load_model(base_url: str, api_key: str, model: str, timeout: int = 300):
+    """Put ``model`` in memory before the request, if it is not there already.
+
+    LM Studio loads a model on its own when a request names one (JIT), so this
+    is only the explicit half of the load -> prompt -> unload cycle: it makes
+    the run work with JIT turned off, and it gives the loading time its own line
+    in the log instead of hiding it inside the chat timeout. Asking twice is NOT
+    free - a second load builds a SECOND instance ('model:2') and costs the VRAM
+    twice - hence the lookup first. Failure is never fatal: the chat request
+    that follows falls back to whatever the server does by itself.
+    """
+    root = _server_root(base_url)
+    try:
+        if _loaded_instances(root, api_key, model, min(timeout, 15)):
+            return
+    except Exception as e:
+        print("[LLMPromptStudio] load: could not list the loaded models (%s)" % e)
+        return
+    try:
+        res = _http_post_json(root + "/api/v1/models/load", {"model": model},
+                              api_key, timeout)
+        print("[LLMPromptStudio] loaded '%s' in %ss"
+              % (res.get("instance_id", model), res.get("load_time_seconds", "?")))
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read().decode("utf-8")
+        except Exception:
+            body = ""
+        print("[LLMPromptStudio] load failed (HTTP %s); leaving it to the server\n%s"
+              % (e.code, body))
+    except Exception as e:
+        print("[LLMPromptStudio] load failed (%s); leaving it to the server" % e)
+
+
+def _unload_model(base_url: str, api_key: str, model: str, timeout: int = 60):
+    """Ask LM Studio to drop ``model`` from memory once the answer is in.
+
+    This is a side effect, never a result: whatever happens here the prompt is
+    already written, so a server that cannot unload only prints a line. Older
+    LM Studio builds have no /api/v1 at all and answer 404 on the address - the
+    message says so instead of pretending the memory was freed.
+    """
+    root = _server_root(base_url)
+    url = root + "/api/v1/models/unload"
+    try:
+        targets = _loaded_instances(root, api_key, model, min(timeout, 15))
+    except Exception as e:
+        # No listing (old build, another backend): name the model directly and
+        # let the server be the judge of whether it is loaded.
+        print("[LLMPromptStudio] unload: could not list the loaded models (%s)" % e)
+        targets = []
+    if not targets:
+        targets = [model]
+    for iid in targets:
+        try:
+            _http_post_json(url, {"instance_id": iid}, api_key, timeout)
+            print("[LLMPromptStudio] unloaded '%s' from %s" % (iid, root))
+        except urllib.error.HTTPError as e:
+            try:
+                body = e.read().decode("utf-8")
+            except Exception:
+                body = ""
+            if "model_not_found" in body:
+                print("[LLMPromptStudio] unload: '%s' was not loaded any more" % iid)
+            elif e.code == 404:
+                print("[LLMPromptStudio] unload: %s has no %s endpoint (LM Studio "
+                      "0.3.30+ only); model left in memory" % (root, "/api/v1/models/unload"))
+            else:
+                print("[LLMPromptStudio] unload failed (HTTP %s) on %s\n%s"
+                      % (e.code, url, body))
+        except Exception as e:
+            print("[LLMPromptStudio] unload failed on %s: %s" % (url, e))
 
 
 # Everything here is an extension to the OpenAI chat schema. Backends that
@@ -790,6 +909,15 @@ class LLMPromptStudio:
                        "repetition_penalty (vLLM) nor repeat_penalty (llama.cpp) "
                        "is sent, whatever the slider says. On = sent as soon as "
                        "the slider leaves 1.0, which is the neutral value."})
+        optional["unload_after"] = ("BOOLEAN", {"default": False,
+            "label_on": "unload model: on", "label_off": "unload model: off",
+            "tooltip": "LM Studio only: drop the model from memory as soon as the "
+                       "answer is in, so the VRAM is free for the Flux/SDXL model "
+                       "further down the graph. Uses LM Studio's own API "
+                       "(/api/v1/models/unload, 0.3.30+), which lives next to the "
+                       "base_url you typed. The next run loads the model again, so "
+                       "leave it off while you iterate on a prompt: reloading costs "
+                       "several seconds per run."})
         return spec
 
     # Always re-run when the seed changes (control_after_generate); fixed seed = cached.
@@ -808,7 +936,7 @@ class LLMPromptStudio:
                  video_stride=4, video_max_frames=8,
                  video_frame_size=VIDEO_FRAME_SIZES[0], video_fps=0.0,
                  video_role=VIDEO_ROLES[0], enable_min_p=True,
-                 enable_repeat_penalty=True, **pictures):
+                 enable_repeat_penalty=True, unload_after=False, **pictures):
 
         # 1) encode the connected images first: how many there are is a fact the
         #    system prompt has to state, otherwise the model reads <Picture 3> in
@@ -935,42 +1063,57 @@ class LLMPromptStudio:
 
         url = _endpoint(base_url, "/chat/completions")
 
-        # 7) call the server, retrying once without the extension fields
+        # 6bis) load -> prompt -> unload: when the model is to be dropped after
+        #    the run it also has to be there before it, so the pair is explicit.
+        #    Loading a big model can take minutes, far more than a chat timeout
+        #    sized for generation, hence the floor of 5 minutes.
+        if unload_after:
+            _load_model(base_url, api_key, resolved_model, max(int(timeout), 300))
+
+        # 7-9 sit in a try/finally so unload_after really means "after": the
+        # memory is freed once the answer is fully in hand, and also when the
+        # request dies halfway - a model loaded by a run that then failed is
+        # exactly the one still sitting on the VRAM the next node needs.
         try:
-            result, err = _post_chat(url, payload, api_key, timeout)
-            if err:
-                print(err)
-                return _ui_result(err, err)
-        except Exception as e:
-            msg = "[LLM ERROR] %s\nURL: %s\n%s" % (e, url, traceback.format_exc())
-            print(msg)
-            return _ui_result(msg, msg)
+            # 7) call the server, retrying once without the extension fields
+            try:
+                result, err = _post_chat(url, payload, api_key, timeout)
+                if err:
+                    print(err)
+                    return _ui_result(err, err)
+            except Exception as e:
+                msg = "[LLM ERROR] %s\nURL: %s\n%s" % (e, url, traceback.format_exc())
+                print(msg)
+                return _ui_result(msg, msg)
 
-        # 8) extract the text
-        try:
-            choice = result["choices"][0]["message"]
-            raw = choice.get("content") or ""
-            # some servers expose reasoning separately; ignore it for the clean output
-        except Exception:
-            msg = "[LLM ERROR] Unexpected response shape:\n" + json.dumps(result)[:2000]
-            print(msg)
-            return _ui_result(msg, msg)
+            # 8) extract the text
+            try:
+                choice = result["choices"][0]["message"]
+                raw = choice.get("content") or ""
+                # some servers expose reasoning separately; ignore it for the clean output
+            except Exception:
+                msg = "[LLM ERROR] Unexpected response shape:\n" + json.dumps(result)[:2000]
+                print(msg)
+                return _ui_result(msg, msg)
 
-        cleaned = _strip_before_tags(raw, strip_before_tag)
+            cleaned = _strip_before_tags(raw, strip_before_tag)
 
-        # 9) update history (store text turns only)
-        if keep_history:
-            turn = _HISTORY.setdefault(hist_key, [])
-            turn.append({"role": "user", "content": user_text})
-            turn.append({"role": "assistant", "content": raw})
-            # keep stored memory bounded to the requested number of turns
-            if keep_msgs == 0:
-                turn.clear()
-            elif len(turn) > keep_msgs:
-                del turn[: len(turn) - keep_msgs]
+            # 9) update history (store text turns only)
+            if keep_history:
+                turn = _HISTORY.setdefault(hist_key, [])
+                turn.append({"role": "user", "content": user_text})
+                turn.append({"role": "assistant", "content": raw})
+                # keep stored memory bounded to the requested number of turns
+                if keep_msgs == 0:
+                    turn.clear()
+                elif len(turn) > keep_msgs:
+                    del turn[: len(turn) - keep_msgs]
 
-        # ui preview shows the CLEANED prompt (no thinking); raw stays on output 2
-        return _ui_result(cleaned, raw)
+            # ui preview shows the CLEANED prompt (no thinking); raw stays on output 2
+            return _ui_result(cleaned, raw)
+        finally:
+            if unload_after:
+                _unload_model(base_url, api_key, resolved_model, timeout)
 
 
 NODE_CLASS_MAPPINGS = {"LLMPromptStudio": LLMPromptStudio}
