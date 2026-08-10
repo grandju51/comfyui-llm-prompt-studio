@@ -1091,50 +1091,49 @@ class LLMPromptStudio:
         if unload_after:
             _load_model(base_url, api_key, resolved_model, max(int(timeout), 300))
 
-        # 7-9 sit in a try/finally so unload_after really means "after": the
-        # memory is freed once the answer is fully in hand, and also when the
-        # request dies halfway - a model loaded by a run that then failed is
-        # exactly the one still sitting on the VRAM the next node needs.
+        # 7) call the server, retrying once without the extension fields
         try:
-            # 7) call the server, retrying once without the extension fields
-            try:
-                result, err = _post_chat(url, payload, api_key, timeout)
-                if err:
-                    print(err)
-                    return _ui_result(err, err)
-            except Exception as e:
-                msg = "[LLM ERROR] %s\nURL: %s\n%s" % (e, url, traceback.format_exc())
-                print(msg)
-                return _ui_result(msg, msg)
+            result, err = _post_chat(url, payload, api_key, timeout)
+            if err:
+                print(err)
+                return _ui_result(err, err)
+        except Exception as e:
+            msg = "[LLM ERROR] %s\nURL: %s\n%s" % (e, url, traceback.format_exc())
+            print(msg)
+            return _ui_result(msg, msg)
 
-            # 8) extract the text
-            try:
-                choice = result["choices"][0]["message"]
-                raw = choice.get("content") or ""
-                # some servers expose reasoning separately; ignore it for the clean output
-            except Exception:
-                msg = "[LLM ERROR] Unexpected response shape:\n" + json.dumps(result)[:2000]
-                print(msg)
-                return _ui_result(msg, msg)
+        # 8) extract the text
+        try:
+            choice = result["choices"][0]["message"]
+            raw = choice.get("content") or ""
+            # some servers expose reasoning separately; ignore it for the clean output
+        except Exception:
+            msg = "[LLM ERROR] Unexpected response shape:\n" + json.dumps(result)[:2000]
+            print(msg)
+            return _ui_result(msg, msg)
 
-            cleaned = _strip_before_tags(raw, strip_before_tag)
+        cleaned = _strip_before_tags(raw, strip_before_tag)
 
-            # 9) update history (store text turns only)
-            if keep_history:
-                turn = _HISTORY.setdefault(hist_key, [])
-                turn.append({"role": "user", "content": user_text})
-                turn.append({"role": "assistant", "content": raw})
-                # keep stored memory bounded to the requested number of turns
-                if keep_msgs == 0:
-                    turn.clear()
-                elif len(turn) > keep_msgs:
-                    del turn[: len(turn) - keep_msgs]
+        # 9) update history (store text turns only)
+        if keep_history:
+            turn = _HISTORY.setdefault(hist_key, [])
+            turn.append({"role": "user", "content": user_text})
+            turn.append({"role": "assistant", "content": raw})
+            # keep stored memory bounded to the requested number of turns
+            if keep_msgs == 0:
+                turn.clear()
+            elif len(turn) > keep_msgs:
+                del turn[: len(turn) - keep_msgs]
 
-            # ui preview shows the CLEANED prompt (no thinking); raw stays on output 2
-            return _ui_result(cleaned, raw)
-        finally:
-            if unload_after:
-                _unload_model(base_url, api_key, resolved_model, timeout)
+        # 10) the whole prompt is in hand: only NOW may the model go. Every
+        #     return above leaves it loaded on purpose - a run that failed is
+        #     one you are about to launch again, and unloading first would make
+        #     the next try pay a full reload of the model it never used.
+        if unload_after:
+            _unload_model(base_url, api_key, resolved_model, timeout)
+
+        # ui preview shows the CLEANED prompt (no thinking); raw stays on output 2
+        return _ui_result(cleaned, raw)
 
 
 NODE_CLASS_MAPPINGS = {"LLMPromptStudio": LLMPromptStudio}
