@@ -96,6 +96,13 @@ wire into the music model's two separate inputs), plus a generic preset.
   3. `put her in a forest, one hand in her pocket, facing a tree with a mouth
      and eyes` → the setting and the pose change; the coat and the pink hat stay.
 
+  A garment that comes off is not forgotten: the sheet moves it from `wearing`
+  to `not wearing` with where it now lies (`on the sand at her feet`), so it
+  stays on the ground in the next images and "she gets dressed again" puts the
+  very same clothes back on. A connected reference picture is read for the
+  **first** image only; after that the sheet wins, so a picture that still
+  shows the old outfit does not bring it back.
+
   Looks, clothes and accessories never change unless you name them; the setting
   stays until you give another; the pose is rewritten from your request, and
   kept when you only ask for something else. The prompt is rewritten **in full**

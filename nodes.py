@@ -812,20 +812,36 @@ sheet, not a new idea: it may be one short sentence ("give her a pink hat"), \
 in any language.
 
 The sheet has this shape (one CHARACTER block per character; add a block when \
-the request brings in someone new):
+the request brings in someone new). If the current sheet has another shape, \
+rewrite it into this one without losing anything:
 CHARACTER 1 - <name or short label>
-  identity: <face, hair, eyes, skin, body, age>
-  outfit: <every garment, each with its colour and material>
-  accessories: <hat, glasses, jewellery, bag, held objects>
+  identity: <what never changes: face, hair cut and colour, eyes, skin, body, age>
+  wearing: <ONLY what is on the body right now: every garment and accessory, \
+each with its colour and material>
+  not wearing: <garments and accessories that are theirs but OFF the body, \
+each with its full description and where it is; "nothing" if none>
 SETTING: <place, time of day, light, weather>
-SCENE: <pose, action, expression, camera framing of THIS image>
+OBJECTS: <things and creatures present in the place that matter to the story, \
+each with where it is; "nothing" if none>
+SCENE: <for THIS image only: pose, action, expression, passing states such as \
+wet hair, camera framing>
 STYLE: <medium, rendering, mood>
 
 How each line reacts to a request:
-- identity, outfit, accessories: copy them WORD FOR WORD. Change only the \
-exact item the request names (a new hat replaces the hat and nothing else). A \
-new place, a new pose or a new action NEVER changes clothes or looks.
+- identity: copy it WORD FOR WORD, always. Expressions, wet hair, sweat or \
+dirt are passing states and belong in SCENE, never here.
+- wearing / not wearing: one garment is on exactly ONE of the two lines. \
+Taking a garment off MOVES it, with its full description, from "wearing" to \
+"not wearing" and says where it now is (on the sand at her feet, over a chair, \
+in her bag). Putting it back on MOVES it back, described exactly as before. \
+"She changes into X" means: what X replaces goes to "not wearing", X goes to \
+"wearing". "She gets dressed again" means: take the garments from "not \
+wearing" - never invent new ones, never read them off a picture. Anything the \
+request does not name stays on its line, word for word. A new place, pose or \
+action NEVER moves a garment by itself.
 - SETTING: keep it unless the request gives another place, time or light.
+- OBJECTS: keep each one where it is until the request moves or removes it. \
+Garments lying in the place are listed under "not wearing", not here.
 - SCENE: rewrite it from the request. If the request does not talk about pose \
 or action and the SETTING did not change, keep SCENE as it is. If the SETTING \
 changed and no pose is given, write a natural pose for the new place.
@@ -834,6 +850,14 @@ changed and no pose is given, write a natural pose for the new place.
 image, fill what the request does not say with sensible concrete choices, \
 because those choices are what every later image has to repeat.
 
+Attached pictures: they show how things looked BEFORE the story started. On \
+the first image (empty sheet) read the identity, the clothes, the place and \
+the style from them, as the request says to use them. Once the sheet has \
+content, THE SHEET IS THE TRUTH and the pictures are only a likeness \
+reference for the face and body: never take clothes, setting, pose or style \
+from a picture again, even if it still shows the old ones - unless the \
+request explicitly points at a picture for something new.
+
 Answer in EXACTLY this layout, in English, with nothing before or after:
 [SHEET]
 <the full updated sheet>
@@ -841,15 +865,19 @@ Answer in EXACTLY this layout, in English, with nothing before or after:
 <the prompt for this image, in the format the instructions above ask for>
 
 The prompt is read by a model that has never seen the other images: describe \
-EVERYTHING on the sheet again - every character, every garment and accessory, \
-the setting, the scene, the style. Never write "same as before", "still", \
-"again" or "now", and never mention the sheet or the story."""
+everything again - every character with all of "wearing", the setting, the \
+objects, the scene, the style. A garment under "not wearing" is NEVER on the \
+body in the prompt: if it is in the current place and could be in frame, \
+describe it as an object lying where the sheet says; otherwise leave it out. \
+Never write "same as before", "still", "again" or "now", and never mention \
+the sheet or the story."""
 
 _STORY_FIRST = ("[CURRENT STORY SHEET]\n(empty - this is the first image of the "
                 "story: build the whole sheet from the request)")
 
 _SHEET_TAG = re.compile(r"\[\s*SHEET\s*\]", re.I)
 _PROMPT_TAG = re.compile(r"\[\s*PROMPT\s*\]", re.I)
+_CLOSE_TAG = re.compile(r"\[\s*/\s*(?:SHEET|PROMPT)\s*\]", re.I)
 
 
 def _story_block(sheet: str) -> str:
@@ -872,7 +900,9 @@ def _split_story(text: str):
     head = text[:cut.start()]
     sheets = list(_SHEET_TAG.finditer(head))
     sheet = head[sheets[-1].end():] if sheets else head
-    return sheet.strip(), text[cut.end():].strip()
+    # Some models close the tags they were only asked to open.
+    return (_CLOSE_TAG.sub("", sheet).strip(),
+            _CLOSE_TAG.sub("", text[cut.end():]).strip())
 
 
 # The sheet widget changes after every run, so ComfyUI's own cache sees a new
