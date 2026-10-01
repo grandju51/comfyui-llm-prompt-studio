@@ -525,6 +525,48 @@ def _resolve_model(base_url: str, api_key: str, model: str, timeout: int):
     return m if m and m.lower() not in _AUTO_MODEL else "local-model"
 
 
+# { (base_url, model): (time, name to read the family from) }
+_FAMILY_NAMES = {}
+_FAMILY_NAME_TTL = 300
+
+
+def _family_name(base_url: str, api_key: str, model: str, timeout: int) -> str:
+    """The name to read ``model``'s thinking family from.
+
+    Usually the model name itself. But vLLM serves a model under whatever
+    --served-model-name says: a Qwen3.8 called "dgx-main" tells nothing, so it
+    was sent the OpenAI ladder, answered 400 on reasoning_effort "high", and the
+    retry then dropped every thinking field - the thinking widget did nothing at
+    all. The server does know what it loaded: /models gives the path as "root".
+    It is appended, never substituted, and only for a name that matches no
+    family; the model is still CALLED by its served name.
+    """
+    if _thinking_family(model):
+        return model
+    key = (base_url, model)
+    hit = _FAMILY_NAMES.get(key)
+    if hit and time.time() - hit[0] < _FAMILY_NAME_TTL:
+        return hit[1]
+    name = model
+    try:
+        req = urllib.request.Request(_endpoint(base_url, "/models"), method="GET")
+        if api_key and api_key.strip():
+            req.add_header("Authorization", "Bearer " + api_key.strip())
+        with urllib.request.urlopen(req, timeout=min(timeout, 15)) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        for it in (data.get("data") if isinstance(data, dict) else data) or []:
+            if isinstance(it, dict) and it.get("id") == model:
+                root = str(it.get("root") or "").strip()
+                if root and root != model:
+                    name = "%s (%s)" % (model, root.rstrip("/").rsplit("/", 1)[-1])
+                break
+    except Exception as e:
+        print("[LLMPromptStudio] could not read what '%s' really is: %s" % (model, e))
+        return model
+    _FAMILY_NAMES[key] = (time.time(), name)
+    return name
+
+
 def _no_think_model(base_url: str, api_key: str, model: str, override: str,
                     timeout: int) -> str:
     """Return the model to call when thinking is off.
@@ -1673,30 +1715,34 @@ class LLMPromptStudio:
         #    to call a different one: on DeepSeek-style servers the reasoning mode
         #    is chosen by the alias, and a request that stays silent means ON.
         resolved_model = _resolve_model(base_url, api_key, model, timeout)
+        # What the family is read from - see _family_name. Re-read after "off"
+        # has picked its model, which may be another one.
+        family = _family_name(base_url, api_key, resolved_model, timeout)
         user_text = user_prompt
         extra_template_kwargs = None
         extra_payload = {}
         if thinking.startswith("off"):
             resolved_model = _no_think_model(base_url, api_key, resolved_model,
                                              no_think_model, timeout)
+            family = _family_name(base_url, api_key, resolved_model, timeout)
             extra_template_kwargs = dict(_TEMPLATE_THINK_KWARGS[False])
-            if _looks_deepseek(resolved_model) or (no_think_model or "").strip():
+            if _looks_deepseek(family) or (no_think_model or "").strip():
                 # /no_think is a Qwen3 chat-template trigger; DeepSeek has no such
                 # rule and would read it as part of the idea. Its proxies take the
                 # Anthropic-style block instead.
                 extra_payload["thinking"] = {"type": "disabled"}
-            elif _has_think_trigger(resolved_model):
+            elif _has_think_trigger(family):
                 user_text = user_text.rstrip() + " /no_think"
         elif thinking.startswith("on"):
             extra_template_kwargs = dict(_TEMPLATE_THINK_KWARGS[True])
             level = _THINKING_EFFORT.get(thinking)
             if level:
-                ctk_extra, payload_extra = _effort_fields(resolved_model, level)
+                ctk_extra, payload_extra = _effort_fields(family, level)
                 extra_template_kwargs.update(ctk_extra)
                 extra_payload.update(payload_extra)
-            if _looks_deepseek(resolved_model):
+            if _looks_deepseek(family):
                 extra_payload["thinking"] = {"type": "enabled"}
-            elif _has_think_trigger(resolved_model):
+            elif _has_think_trigger(family):
                 user_text = user_text.rstrip() + " /think"
 
         # 4) build the user message content (text, + pictures for vision models).
