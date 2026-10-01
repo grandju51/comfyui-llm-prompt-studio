@@ -86,6 +86,26 @@ wire into the music model's two separate inputs), plus a generic preset.
   (e.g. `</think>,</thinking>,</reasoning>`) — the comma is only a separator,
   and whichever tag ends furthest into the text is used as the cut point. This
   is the robust safety net for hiding thinking.
+- **Story mode** (`story_mode` + `story_sheet`): for a series of images that
+  tells one story. The node keeps a **sheet** — each character's looks, outfit
+  and accessories, the setting, the scene, the style — and `user_prompt` becomes
+  a **change request** against it:
+
+  1. `a red-haired woman in a blue coat on a rainy street` → builds the sheet.
+  2. `give her a pink hat instead` → only the hat line changes.
+  3. `put her in a forest, one hand in her pocket, facing a tree with a mouth
+     and eyes` → the setting and the pose change; the coat and the pink hat stay.
+
+  Looks, clothes and accessories never change unless you name them; the setting
+  stays until you give another; the pose is rewritten from your request, and
+  kept when you only ask for something else. The prompt is rewritten **in full**
+  from the sheet on every run, so nothing is ever forgotten, however long the
+  story gets. The sheet sits in the `story_sheet` box: it is saved with the
+  workflow, you can **edit it by hand**, **🆕 New story** empties it and
+  **↩ Undo** takes back the last change. It also comes out of the third output.
+  Made for text-to-image cards (pair it with a LoRA for the face). While it is
+  on, `keep_history` is not used. The sheet and the prompt are both written out
+  of `max_tokens`: raise it if the node reports a sheet with no prompt.
 - **Conversation memory**: `keep_history` for multi-turn chat,
   `max_history_turns` to set how many past turns are remembered (context depth),
   and `reset_history` to clear it.
@@ -226,6 +246,8 @@ Outputs:
   `STRING`, so you can wire it into a CLIP Text Encode, an API node, **or any
   Text / Show-Text / Text-Preview node**.
 - `raw_response` – the full untouched answer (for debugging the thinking).
+- `story_sheet` – the story sheet as it stands after the run (empty when
+  `story_mode` is off).
 - **On-node preview**: after each run the node also shows the generated prompt
   (cleaned, no thinking) right on itself, so you can read it without wiring a
   preview node.

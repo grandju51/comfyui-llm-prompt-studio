@@ -781,9 +781,106 @@ def _post_chat(url: str, payload: dict, api_key: str, timeout: int):
                           % (first, dropped, e2.code, _body(e2)))
 
 
-def _ui_result(prompt_text: str, raw_text: str):
-    """Return both the on-node text preview and the two STRING outputs."""
-    return {"ui": {"text": [prompt_text]}, "result": (prompt_text, raw_text)}
+def _ui_result(prompt_text: str, raw_text: str, sheet: str = ""):
+    """Return both the on-node text preview and the STRING outputs.
+
+    ``sheet`` is the story sheet as it stands - the one that came in, on every
+    path that did not write a new one, so the third output never goes blank on
+    an error.
+    """
+    return {"ui": {"text": [prompt_text]},
+            "result": (prompt_text, raw_text, sheet)}
+
+
+# ------------------------------------------------------------------ story mode
+# A series of images telling one story needs the character to keep her clothes
+# from scene to scene without the user repeating them. Chat history does not do
+# that: it is capped (max_history_turns), so the turn that described the outfit
+# falls out, and until then the model has to dig the outfit out of old prompts.
+# So the node keeps a SHEET instead - who, wearing what, where, doing what - and
+# every run is "the sheet + one change request": the LLM returns the sheet with
+# only the touched lines changed, then the full prompt written from it.
+#
+# The sheet lives in a widget (story_sheet), not on the server: it is saved with
+# the workflow, the user can read and fix it, and "new story" is emptying a box.
+_STORY_RULES = """\
+[STORY MODE - this overrides any earlier rule about outputting only the prompt]
+You are writing one image of a SERIES that tells a story. Between images, \
+things stay the same unless the user says otherwise. To keep track you \
+maintain a STORY SHEET. The user message is a CHANGE REQUEST against that \
+sheet, not a new idea: it may be one short sentence ("give her a pink hat"), \
+in any language.
+
+The sheet has this shape (one CHARACTER block per character; add a block when \
+the request brings in someone new):
+CHARACTER 1 - <name or short label>
+  identity: <face, hair, eyes, skin, body, age>
+  outfit: <every garment, each with its colour and material>
+  accessories: <hat, glasses, jewellery, bag, held objects>
+SETTING: <place, time of day, light, weather>
+SCENE: <pose, action, expression, camera framing of THIS image>
+STYLE: <medium, rendering, mood>
+
+How each line reacts to a request:
+- identity, outfit, accessories: copy them WORD FOR WORD. Change only the \
+exact item the request names (a new hat replaces the hat and nothing else). A \
+new place, a new pose or a new action NEVER changes clothes or looks.
+- SETTING: keep it unless the request gives another place, time or light.
+- SCENE: rewrite it from the request. If the request does not talk about pose \
+or action and the SETTING did not change, keep SCENE as it is. If the SETTING \
+changed and no pose is given, write a natural pose for the new place.
+- STYLE: keep it unless the request asks for another.
+- Never drop a line, never summarise one, never leave one empty: on the first \
+image, fill what the request does not say with sensible concrete choices, \
+because those choices are what every later image has to repeat.
+
+Answer in EXACTLY this layout, in English, with nothing before or after:
+[SHEET]
+<the full updated sheet>
+[PROMPT]
+<the prompt for this image, in the format the instructions above ask for>
+
+The prompt is read by a model that has never seen the other images: describe \
+EVERYTHING on the sheet again - every character, every garment and accessory, \
+the setting, the scene, the style. Never write "same as before", "still", \
+"again" or "now", and never mention the sheet or the story."""
+
+_STORY_FIRST = ("[CURRENT STORY SHEET]\n(empty - this is the first image of the "
+                "story: build the whole sheet from the request)")
+
+_SHEET_TAG = re.compile(r"\[\s*SHEET\s*\]", re.I)
+_PROMPT_TAG = re.compile(r"\[\s*PROMPT\s*\]", re.I)
+
+
+def _story_block(sheet: str) -> str:
+    sheet = (sheet or "").strip()
+    return _STORY_RULES + "\n\n" + (
+        "[CURRENT STORY SHEET]\n" + sheet if sheet else _STORY_FIRST)
+
+
+def _split_story(text: str):
+    """(sheet, prompt) out of a story-mode answer; either may be "".
+
+    The LAST [PROMPT] wins, and the [SHEET] before it: a reasoning block the cut
+    tag did not remove may well quote the layout before the real answer.
+    """
+    prompts = list(_PROMPT_TAG.finditer(text))
+    if not prompts:
+        sheets = list(_SHEET_TAG.finditer(text))
+        return (text[sheets[-1].end():].strip(), "") if sheets else ("", text.strip())
+    cut = prompts[-1]
+    head = text[:cut.start()]
+    sheets = list(_SHEET_TAG.finditer(head))
+    sheet = head[sheets[-1].end():] if sheets else head
+    return sheet.strip(), text[cut.end():].strip()
+
+
+# The sheet widget changes after every run, so ComfyUI's own cache sees a new
+# input on the next queue and runs the node again even on a fixed seed - the
+# 2-pass setup the README tells people to use. This answers that second run
+# from memory: same request, same seed, and the sheet coming in is the very one
+# the last run wrote. { node id: (signature, sheet written, result) }
+_STORY_MEMO = {}
 
 
 # ------------------------------------------------------------ offline fallback
@@ -855,7 +952,7 @@ def _server_reachable(base_url: str, api_key: str, timeout: float = 5):
 
 
 def _offline_result(mode: str, key: str, unique_id, user_prompt: str,
-                    base_url: str, why: str):
+                    base_url: str, why: str, sheet: str = ""):
     """What the node returns when the LLM cannot be reached (see OFFLINE_MODES)."""
     _DEGRADED.add(str(unique_id))
     head = "[LLM OFFLINE] %s is unreachable (%s)" % (base_url, why)
@@ -877,7 +974,7 @@ def _offline_result(mode: str, key: str, unique_id, user_prompt: str,
     # The preview carries the warning; the prompt output stays clean.
     return {"ui": {"text": ["⚠ LLM OFFLINE - %s\n\n%s" % (note, prompt)],
                    "llm_offline": [msg]},
-            "result": (prompt, msg)}
+            "result": (prompt, msg, sheet)}
 
 
 def _target_size(width: int, height: int, size_mode: str):
@@ -1163,8 +1260,8 @@ class LLMPromptStudio:
 
     CATEGORY = "LLM Prompt Studio"
     FUNCTION = "generate"
-    RETURN_TYPES = ("STRING", "STRING")
-    RETURN_NAMES = ("prompt", "raw_response")
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("prompt", "raw_response", "story_sheet")
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -1429,6 +1526,22 @@ class LLMPromptStudio:
                        "as typed - for when it already is a prompt. 'stop with an "
                        "error': the run stops. Either way the dot on the title "
                        "turns red and the preview says what was sent."})
+        optional["story_mode"] = ("BOOLEAN", {"default": False,
+            "label_on": "story: on", "label_off": "story: off",
+            "tooltip": "For a series of images telling one story. The node keeps "
+                       "a sheet (who, wearing what, where, doing what) in "
+                       "story_sheet below, and user_prompt becomes a change "
+                       "request: 'give her a pink hat', 'put her in a forest'. "
+                       "Only what you name changes - clothes and looks stay until "
+                       "you say otherwise - and the prompt is rewritten in full "
+                       "from the sheet each time. The first run builds the sheet "
+                       "from your description. Meant for text-to-image cards. "
+                       "While it is on, keep_history is not used: the sheet is "
+                       "the memory, and it never runs out of turns."})
+        optional["story_sheet"] = ("STRING", {"multiline": True, "default": "",
+            "tooltip": "What the story holds so far. Written by the node after "
+                       "each run and saved with the workflow; edit it by hand to "
+                       "fix what the LLM got wrong, empty it to start a new story."})
         # Last: the picture sockets the front-end adds beyond the advertised
         # pool are resolved by this dict, not by the block above.
         spec["optional"] = _PictureSlots(spec["optional"])
@@ -1455,15 +1568,34 @@ class LLMPromptStudio:
                  video_role=VIDEO_ROLES[0], enable_min_p=True,
                  enable_repeat_penalty=True, unload_after=False,
                  context_length=0, context_slots=0,
-                 on_llm_offline=OFFLINE_MODES[0], **pictures):
+                 on_llm_offline=OFFLINE_MODES[0], story_mode=False,
+                 story_sheet="", **pictures):
 
-        # 0) is anybody there? Checked first, before any picture is encoded or
-        #    any lookup spends its own timeout on a server that is off.
+        # 0) the same story request on the same seed, with the sheet the last
+        #    run wrote: that run's answer, without asking again (_STORY_MEMO).
+        #    Not with a picture or a video connected - what they show is part of
+        #    the request and is not in the signature.
+        sheet_in = (story_sheet or "").strip() if story_mode else ""
+        memo_key = str(unique_id)
+        memo_sig = None
+        if story_mode and image is None and video is None and audio is None \
+                and not any(v is not None for v in pictures.values()):
+            memo_sig = json.dumps(
+                [base_url, model, target_model, global_directives, system_prompt,
+                 user_prompt, temperature, top_p, top_k, min_p, repeat_penalty,
+                 max_tokens, seed, thinking, strip_before_tag, no_think_model],
+                default=str)
+            hit = _STORY_MEMO.get(memo_key)
+            if hit and hit[0] == memo_sig and hit[1] == sheet_in:
+                return hit[2]
+
+        # 0bis) is anybody there? Checked before any picture is encoded or any
+        #    lookup spends its own timeout on a server that is off.
         last_key = _prompt_key(unique_id, target_model)
         up, why = _server_reachable(base_url, api_key)
         if not up:
             return _offline_result(on_llm_offline, last_key, unique_id,
-                                   user_prompt, base_url, why)
+                                   user_prompt, base_url, why, sheet_in)
 
         # 1) encode the connected images first: how many there are is a fact the
         #    system prompt has to state, otherwise the model reads <Picture 3> in
@@ -1501,6 +1633,11 @@ class LLMPromptStudio:
                 + "\n\n[GLOBAL DIRECTIVES - always apply these on top of everything "
                 + "above]\n" + gd
             )
+
+        # 2bis) story mode: the rules and the sheet as it stands go last, so the
+        #    layout they ask for is the final word on what to output.
+        if story_mode:
+            sys_prompt += "\n\n" + _story_block(sheet_in)
 
         # 3) thinking control. The model is resolved FIRST because "off" may have
         #    to call a different one: on DeepSeek-style servers the reasoning mode
@@ -1560,6 +1697,9 @@ class LLMPromptStudio:
 
         keep_msgs = max(0, int(max_history_turns)) * 2
         messages = [{"role": "system", "content": sys_prompt}]
+        # Story mode has the sheet for a memory; old turns next to it would be a
+        # second, staler version of the same facts.
+        keep_history = keep_history and not story_mode
         if keep_history and keep_msgs:
             hist = _HISTORY.get(hist_key, [])
             messages.extend(hist[-keep_msgs:])
@@ -1626,7 +1766,7 @@ class LLMPromptStudio:
                 result, err = _post_chat(url, payload, api_key, timeout)
             if err:
                 print(err)
-                return _ui_result(err, err)
+                return _ui_result(err, err, sheet_in)
         except Exception as e:
             # Gone in the middle of the run? A timeout on a server that still
             # answers is a slow generation, not an offline one, and stays an
@@ -1634,10 +1774,10 @@ class LLMPromptStudio:
             up, why = _server_reachable(base_url, api_key)
             if not up:
                 return _offline_result(on_llm_offline, last_key, unique_id,
-                                       user_prompt, base_url, why)
+                                       user_prompt, base_url, why, sheet_in)
             msg = "[LLM ERROR] %s\nURL: %s\n%s" % (e, url, traceback.format_exc())
             print(msg)
-            return _ui_result(msg, msg)
+            return _ui_result(msg, msg, sheet_in)
 
         # 8) extract the text
         try:
@@ -1653,7 +1793,7 @@ class LLMPromptStudio:
         except Exception:
             msg = "[LLM ERROR] Unexpected response shape:\n" + json.dumps(result)[:2000]
             print(msg)
-            return _ui_result(msg, msg)
+            return _ui_result(msg, msg, sheet_in)
 
         if finish == "length":
             print("[LLMPromptStudio] the answer was cut at max_tokens (%d); "
@@ -1675,7 +1815,33 @@ class LLMPromptStudio:
                    "block is spent from the same token budget as the prompt."
                    % why)
             print(msg)
-            return _ui_result(msg, raw or reasoning or json.dumps(result)[:2000])
+            return _ui_result(msg, raw or reasoning or json.dumps(result)[:2000],
+                              sheet_in)
+
+        # 8a) story mode: the answer is a sheet and a prompt. Only the prompt
+        #    goes down the graph; the sheet goes back to its widget.
+        sheet_out, story_note = sheet_in, ""
+        if story_mode:
+            new_sheet, story_prompt = _split_story(cleaned)
+            if not story_prompt:
+                # A sheet and nothing after it: the budget ran out halfway.
+                # Sending the sheet on as the prompt would be worse than saying so.
+                msg = ("[LLM ERROR] Story mode: the answer has a sheet but no "
+                       "[PROMPT] part%s.\nRaise max_tokens - the sheet and the "
+                       "prompt are both written from it. The sheet was left as "
+                       "it was." % (" (cut at max_tokens = %d)" % int(max_tokens)
+                                    if finish == "length" else ""))
+                print(msg)
+                return _ui_result(msg, raw, sheet_in)
+            cleaned = story_prompt
+            if new_sheet:
+                sheet_out = new_sheet
+            else:
+                # No [SHEET]/[PROMPT] layout at all: the text is taken as the
+                # prompt and the sheet stays, rather than losing the story.
+                story_note = ("the answer did not follow the [SHEET]/[PROMPT] "
+                              "layout; the sheet was left as it was")
+                print("[LLMPromptStudio] story mode: " + story_note)
 
         # 8bis) a real prompt: it is what a later offline run falls back on.
         _remember_prompt(last_key, cleaned)
@@ -1704,7 +1870,15 @@ class LLMPromptStudio:
             _unload_model(base_url, api_key, resolved_model, timeout)
 
         # ui preview shows the CLEANED prompt (no thinking); raw stays on output 2
-        return _ui_result(cleaned, raw)
+        out = _ui_result(cleaned, raw, sheet_out)
+        if story_mode:
+            # The front-end writes this back into the story_sheet widget.
+            out["ui"]["story_sheet"] = [sheet_out]
+            if story_note:
+                out["ui"]["story_note"] = [story_note]
+            if memo_sig:
+                _STORY_MEMO[memo_key] = (memo_sig, sheet_out, out)
+        return out
 
 
 NODE_CLASS_MAPPINGS = {"LLMPromptStudio": LLMPromptStudio}

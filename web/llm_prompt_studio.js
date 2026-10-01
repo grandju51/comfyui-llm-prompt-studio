@@ -229,6 +229,22 @@ function toast(severity, summary, detail) {
     }
 }
 
+// ------------------------------------------------------------------ story sheet
+// story_sheet is a real, serialized widget: the backend reads it as the story so
+// far and each run sends back the updated one, written here into the same box.
+// That is the whole persistence - the story is saved with the workflow, and the
+// user can read and correct it. One step of undo is kept, for the run that
+// changed what it should not have (and for a 'new story' clicked by mistake).
+function setStorySheet(node, text) {
+    const w = getWidget(node, "story_sheet");
+    if (!w) return;
+    const next = String(text ?? "");
+    if (next === String(w.value ?? "")) return;
+    node._prevSheet = String(w.value ?? "");
+    w.value = next;
+    app.graph?.setDirtyCanvas(true, true);
+}
+
 // ------------------------------------------------------------- resizable boxes
 // ComfyUI pins .comfy-multiline-input to `resize: none` AND recomputes the
 // textarea height from the widget layout on every redraw, so showing the
@@ -541,6 +557,17 @@ app.registerExtension({
             );
             dontSerialize(presetBtn);
 
+            dontSerialize(node.addWidget("button", "🆕 New story (empty the sheet)",
+                null, () => setStorySheet(node, "")));
+            dontSerialize(node.addWidget("button", "↩ Undo the last sheet change",
+                null, () => {
+                    if (node._prevSheet === undefined) {
+                        toast("info", "Story sheet", "Nothing to undo yet.");
+                        return;
+                    }
+                    setStorySheet(node, node._prevSheet);
+                }));
+
             // Auto-load the matching preset into the system prompt box on change.
             const tw = getWidget(node, "target_model");
             if (tw) {
@@ -631,6 +658,11 @@ app.registerExtension({
             } else if (message?.text !== undefined) {
                 node._llmOnline = true;
             }
+            const join = (v) => (Array.isArray(v) ? v.join("") : String(v));
+            if (message?.story_sheet !== undefined) {
+                setStorySheet(node, join(message.story_sheet));
+            }
+            if (message?.story_note) toast("warn", "Story mode", join(message.story_note));
             const text = message?.text;
             if (text === undefined || text === null) return;
             const value = Array.isArray(text) ? text.join("") : String(text);
