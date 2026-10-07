@@ -363,7 +363,8 @@ function readonlyBox(node, name) {
 // The node declares eight picture sockets (nodes.py, MAX_PICTURES) so it still
 // works without this file, but eight is a pool, not a ceiling: here the node
 // shows exactly ONE empty socket after the last filled one, and grows another
-// the moment that one is taken. The backend resolves any image_N it is sent
+// the moment that one is taken. They are the last sockets of the node, so a
+// socket added at the end lands right under the others. The backend resolves any image_N it is sent
 // (_PictureSlots in nodes.py), so the numbering may run as high as you connect.
 //
 // Socket 1 is named "image", not "image_1": that is the name the node shipped
@@ -384,52 +385,27 @@ function pictureTooltip(n) {
     );
 }
 
-// A link remembers which input index it lands on. Reordering or removing inputs
-// moves those indices, so every link is re-stamped afterwards - otherwise the
-// wire stays drawn on the socket it used to sit on.
-function reindexInputLinks(node) {
-    const links = node.graph?.links;
-    if (!links) return;
-    node.inputs.forEach((inp, i) => {
-        if (inp?.link == null) return;
-        const l = typeof links.get === "function" ? links.get(inp.link) : links[inp.link];
-        if (l) l.target_slot = i;
-    });
-}
-
-// addInput() appends at the very bottom, which would leave image_9 sitting
-// under `audio` and `video`. The picture sockets are put back together where
-// the block already starts.
-function orderPictureSlots(node) {
-    const inputs = node.inputs || [];
-    const pics = [];
-    const rest = [];
-    let at = -1;
-    for (const inp of inputs) {
-        if (pictureIndex(inp.name)) {
-            if (at < 0) at = rest.length;
-            pics.push(inp);
-        } else {
-            rest.push(inp);
-        }
-    }
-    if (at < 0 || pics.length < 2) return;
-    pics.sort((a, b) => pictureIndex(a.name) - pictureIndex(b.name));
-    const ordered = rest.slice(0, at).concat(pics, rest.slice(at));
-    if (ordered.every((inp, i) => inp === inputs[i])) return;
-    inputs.length = 0;
-    inputs.push(...ordered);
-    reindexInputLinks(node);
+// A wire belongs to a socket POSITION, not to the socket: the frontend files
+// every link under (node, input index), and input.link is read back from that
+// index. So input objects must never be moved around by hand - this file used
+// to lift image_9 back up under image_8 by splicing node.inputs, which left
+// every wire below it on the socket one step further down: seed landed on
+// max_tokens, user_prompt on system_prompt. Sockets are only ever added with
+// addInput() (at the very end, where a reload puts them too) and removed with
+// removeInput(), the two calls that move the wires along with them.
+function inputConnected(node, i) {
+    if (typeof node.isInputConnected === "function") return node.isInputConnected(i);
+    return node.inputs[i]?.link != null;
 }
 
 function syncPictureSlots(node) {
     try {
         if (!node.inputs) return;
         let filled = 0;
-        for (const inp of node.inputs) {
+        node.inputs.forEach((inp, i) => {
             const n = pictureIndex(inp.name);
-            if (n && inp.link != null) filled = Math.max(filled, n);
-        }
+            if (n && inputConnected(node, i)) filled = Math.max(filled, n);
+        });
         // One free socket after the last filled one, and not one more.
         const want = filled + 1;
 
@@ -439,7 +415,7 @@ function syncPictureSlots(node) {
         // <Picture 2>, and removing the gap would move a wire the user made.
         for (let i = node.inputs.length - 1; i >= 0; i--) {
             const n = pictureIndex(node.inputs[i].name);
-            if (n > 1 && n > want && node.inputs[i].link == null) node.removeInput(i);
+            if (n > 1 && n > want && !inputConnected(node, i)) node.removeInput(i);
         }
 
         let highest = 0;
@@ -447,10 +423,95 @@ function syncPictureSlots(node) {
         for (let n = highest + 1; n <= want; n++) {
             node.addInput("image_" + n, "IMAGE", { tooltip: pictureTooltip(n) });
         }
-        orderPictureSlots(node);
         app.graph?.setDirtyCanvas(true, true);
     } catch (e) {
         console.warn("[coco] could not grow the image slots:", e);
+    }
+}
+
+// ------------------------------------------------------ reopening a workflow
+// A saved node lists its inputs in the order they had on screen, and each link
+// says which POSITION it lands on. On load, the frontend rebuilds the inputs in
+// the node definition's order instead - picture sockets that had been trimmed
+// come back in the middle, sockets added at run time go to the end - but it
+// keeps the saved positions on the links. Any difference between the two
+// orders moved wires onto the wrong sockets, and every save made it worse.
+//
+// So before the graph is built (beforeConfigureGraph), each saved node is
+// rewritten in the very order the frontend is about to give it, and its links
+// are pointed at the new positions. Inputs are matched by NAME, which is what
+// the frontend itself goes by. The order is read off a throwaway node, so it
+// is the real one rather than a guess at it.
+let probing = false;
+let definedOrder = null;
+
+function definedInputs() {
+    if (definedOrder) return definedOrder;
+    try {
+        probing = true;
+        const probe = globalThis.LiteGraph?.createNode(NODE_NAME);
+        definedOrder = probe?.inputs?.map((i) => ({
+            name: i.name,
+            type: i.type,
+            widget: i.widget ? { name: i.widget.name } : undefined,
+        })) || null;
+    } catch (e) {
+        console.warn("[coco] could not read the input order:", e);
+    } finally {
+        probing = false;
+    }
+    return definedOrder;
+}
+
+function linkTarget(link) {
+    return Array.isArray(link) ? [link[0], link[3]] : [link?.id, link?.target_id];
+}
+
+function setLinkSlot(link, slot) {
+    if (Array.isArray(link)) link[4] = slot;
+    else link.target_slot = slot;
+}
+
+function realignGraph(graph, defined) {
+    const byNode = new Map();
+    for (const node of graph?.nodes || []) {
+        if (node?.type !== NODE_NAME || !Array.isArray(node.inputs)) continue;
+        const saved = new Map(node.inputs.map((inp) => [inp.name, inp]));
+        const definedNames = new Set(defined.map((d) => d.name));
+        const ordered = defined
+            .map((d) => saved.get(d.name) ?? { ...d, link: null })
+            .concat(node.inputs.filter((inp) => !definedNames.has(inp.name)));
+        if (ordered.every((inp, i) => inp.name === node.inputs[i]?.name)) continue;
+        const slots = new Map();
+        ordered.forEach((inp, i) => {
+            if (inp.link != null) slots.set(String(inp.link), i);
+        });
+        node.inputs = ordered;
+        byNode.set(String(node.id), slots);
+    }
+    if (!byNode.size) return 0;
+    let moved = 0;
+    for (const link of graph.links || []) {
+        const [id, target] = linkTarget(link);
+        const slot = byNode.get(String(target))?.get(String(id));
+        if (slot === undefined) continue;
+        setLinkSlot(link, slot);
+        moved++;
+    }
+    return moved;
+}
+
+function realignWorkflow(graphData) {
+    try {
+        const defined = definedInputs();
+        if (!defined || !graphData) return;
+        let moved = realignGraph(graphData, defined);
+        for (const sub of graphData.definitions?.subgraphs || []) {
+            moved += realignGraph(sub, defined);
+        }
+        if (moved) console.info("[coco] realigned %d wire(s) on reopening", moved);
+    } catch (e) {
+        console.warn("[coco] could not realign the saved wires:", e);
     }
 }
 
@@ -459,6 +520,9 @@ app.registerExtension({
     async setup() {
         startStatusPolling();
         await loadTemplates();
+    },
+    async beforeConfigureGraph(graphData) {
+        realignWorkflow(graphData);
     },
     async beforeRegisterNodeDef(nodeType, nodeData) {
         if (PREVIEW_NODES.has(nodeData.name)) {
@@ -511,6 +575,8 @@ app.registerExtension({
         nodeType.prototype.onNodeCreated = function () {
             const ret = onNodeCreated?.apply(this, arguments);
             const node = this;
+            // The node built only to read the input order: never shown.
+            if (probing) return ret;
 
             // Turn `model` into a dropdown, in its own slot. Done before
             // configure() runs, so a saved value lands straight in the combo.

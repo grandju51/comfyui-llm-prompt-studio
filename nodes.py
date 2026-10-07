@@ -1614,9 +1614,19 @@ class LLMPromptStudio:
             "tooltip": "What the story holds so far. Written by the node after "
                        "each run and saved with the workflow; edit it by hand to "
                        "fix what the LLM got wrong, empty it to start a new story."})
+        # audio and video go above the pictures, so the picture sockets are the
+        # node's last ones: the front-end adds image_9 and up at the very end,
+        # which then lands right under image_8. Only sockets move - widgets
+        # keep their order, and widgets_values with it. Saved workflows are
+        # realigned by name when they are opened (web/, realignWorkflow).
+        names = list(optional)
+        for key in ("audio", "video"):
+            names.remove(key)
+            names.insert(names.index("image"), key)
+        optional = {k: optional[k] for k in names}
         # Last: the picture sockets the front-end adds beyond the advertised
         # pool are resolved by this dict, not by the block above.
-        spec["optional"] = _PictureSlots(spec["optional"])
+        spec["optional"] = _PictureSlots(optional)
         return spec
 
     # Always re-run when the seed changes (control_after_generate); fixed seed = cached.
