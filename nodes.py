@@ -1614,6 +1614,14 @@ class LLMPromptStudio:
             "tooltip": "What the story holds so far. Written by the node after "
                        "each run and saved with the workflow; edit it by hand to "
                        "fix what the LLM got wrong, empty it to start a new story."})
+        # LAST widget on purpose: widgets_values is positional, so anything added
+        # earlier would shift every saved workflow by a slot.
+        optional["enabled"] = ("BOOLEAN", {"default": True,
+            "label_on": "LLM: on", "label_off": "LLM: off",
+            "tooltip": "On: the node works as usual and asks the LLM. Off: the "
+                       "LLM is never contacted - user_prompt goes straight to "
+                       "the prompt output exactly as typed (raw_response gets "
+                       "the same text, story_sheet passes through unchanged)."})
         # audio and video go above the pictures, so the picture sockets are the
         # node's last ones: the front-end adds image_9 and up at the very end,
         # which then lands right under image_8. Only sockets move - widgets
@@ -1632,6 +1640,9 @@ class LLMPromptStudio:
     # Always re-run when the seed changes (control_after_generate); fixed seed = cached.
     @classmethod
     def IS_CHANGED(cls, seed=0, unique_id=None, **kwargs):
+        # Bypassed: the answer depends on the inputs alone, never on the seed.
+        if not kwargs.get("enabled", True):
+            return "bypass"
         # NaN never equals itself: a node that last sent a stand-in runs again.
         if str(unique_id) in _DEGRADED:
             return float("nan")
@@ -1651,7 +1662,15 @@ class LLMPromptStudio:
                  enable_repeat_penalty=True, unload_after=False,
                  context_length=0, context_slots=0,
                  on_llm_offline=OFFLINE_MODES[0], story_mode=False,
-                 story_sheet="", **pictures):
+                 story_sheet="", enabled=True, **pictures):
+
+        # -1) switched off: no LLM, no model lookup, no picture encoding - the
+        #     user_prompt goes straight out as typed.
+        if not enabled:
+            _DEGRADED.discard(str(unique_id))
+            text = user_prompt if user_prompt is not None else ""
+            print("[LLMPromptStudio] LLM switched off: user_prompt passed through")
+            return _ui_result(text, text, story_sheet or "")
 
         # 0) the same story request on the same seed, with the sheet the last
         #    run wrote: that run's answer, without asking again (_STORY_MEMO).

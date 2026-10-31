@@ -176,8 +176,8 @@ async function detectModel(node, select = false) {
 
 // ------------------------------------------------------------- server status
 // A dot on the title: green = the LLM answers at base_url, red = it does not,
-// grey = not asked yet. Polled, so it turns red BEFORE a run, not only after
-// one - and a run that had to fall back sets it too (onExecuted below).
+// grey = not asked yet. Asked only by the refresh / Check buttons; every run
+// sets it too (onExecuted below).
 const STATUS_EVERY_MS = 10000;
 const DOT_COLORS = { true: "#3ddc84", false: "#ff4d4d", undefined: "#888888" };
 // One request per address and per round, however many nodes point at it.
@@ -202,24 +202,33 @@ function serverStatus(base, key, force = false) {
 }
 
 async function refreshStatus(node, force = false) {
+    // Switched off: the LLM is not used, so its state is not shown either.
+    if (typeof isEnabled === "function" && !isEnabled(node)) {
+        if (node._llmOnline !== undefined) {
+            node._llmOnline = undefined;
+            app.graph?.setDirtyCanvas(true, false);
+        }
+        return;
+    }
     const base = getWidget(node, "base_url")?.value || "http://localhost:1234/v1";
     const key = getWidget(node, "api_key")?.value || "";
-    const online = await serverStatus(base, key, force);
-    if (online === node._llmOnline) return;
+    // "Checking" is shown only while a request is really in flight.
+    node._llmChecking = true;
+    syncBar(node);
+    let online;
+    try {
+        online = await serverStatus(base, key, force);
+    } finally {
+        node._llmChecking = false;
+    }
     node._llmOnline = online;
+    syncBar(node);
     app.graph?.setDirtyCanvas(true, false);
 }
 
-let statusTimer = null;
-function startStatusPolling() {
-    if (statusTimer) return;
-    statusTimer = setInterval(() => {
-        if (document.visibilityState !== "visible") return;
-        for (const node of app.graph?._nodes || []) {
-            if ((node.comfyClass || node.type) === NODE_NAME) refreshStatus(node);
-        }
-    }, STATUS_EVERY_MS);
-}
+// Nothing is requested on its own: no timer, nothing on load, on the LLM switch
+// or on a URL edit. The server is asked only when a refresh / Check button is
+// pressed; every run updates the dot too, from its own result (onExecuted).
 
 function toast(severity, summary, detail) {
     try {
@@ -294,8 +303,8 @@ function makeResizable(node, w) {
         // _cocoBox = what the layout must reserve (margins included);
         // _cocoHeight = the textarea itself, for the legacy canvas path, which
         // has no margin to account for.
-        w.options.getMinHeight = () => w._cocoBox || origMin?.();
-        w.options.getMaxHeight = () => w._cocoBox || origMax?.();
+        w.options.getMinHeight = () => (w._cocoHidden ? 0 : w._cocoBox || origMin?.());
+        w.options.getMaxHeight = () => (w._cocoHidden ? 0 : w._cocoBox || origMax?.());
         if (typeof w.computeSize === "function") {
             const origSize = w.computeSize.bind(w);
             w.computeSize = (width) =>
@@ -309,6 +318,13 @@ function makeResizable(node, w) {
         const margin = typeof w.margin === "number" ? w.margin : DEFAULT_WIDGET_MARGIN;
         let last = Math.round(el.offsetHeight);
         new ResizeObserver(() => {
+            // Hidden (display:none) reads as height 0: not a resize by the user.
+            if (w._cocoHidden) return;
+            if (w._cocoResync) {
+                w._cocoResync = false;
+                last = Math.round(el.offsetHeight) || last;
+                return;
+            }
             const h = Math.max(MIN_BOX_HEIGHT, Math.round(el.offsetHeight));
             if (!h || Math.abs(h - last) < 2) return;
             const delta = h - last;
@@ -515,10 +531,606 @@ function realignWorkflow(graphData) {
     }
 }
 
+// ====================================================================
+// Compact layout: the node shows its text boxes, target_model and the story
+// toggle; every other setting lives in a Settings dialog opened from the bar
+// at the top of the node, next to the LLM on/off switch.
+//
+// NOTHING here removes or reorders a widget. widgets_values is positional, so
+// the hidden widgets stay exactly where they were and keep their values: they
+// are only given no height and no drawing (setHidden), and the dialog edits
+// them through the same `.value` / `.callback` a click on the node would.
+// ====================================================================
+const BAR_H = 40;
+
+// Everything the node keeps out of sight until the Settings dialog is opened.
+// `enabled` is driven by the switch in the bar; control_after_generate is the
+// combo the frontend attaches to `seed`.
+const HIDDEN_NAMES = [
+    "model", "api_key", "temperature", "top_p", "top_k", "min_p",
+    "repeat_penalty", "max_tokens", "seed", "control_after_generate",
+    "thinking", "strip_before_tag", "no_think_model", "keep_history",
+    "max_history_turns", "reset_history", "timeout", "image_analysis_size",
+    "audio_role", "video_stride", "video_max_frames", "video_frame_size",
+    "video_fps", "video_role", "enable_min_p", "enable_repeat_penalty",
+    "unload_after", "context_length", "context_slots", "on_llm_offline",
+    "enabled",
+];
+
+const BOX_HINTS = {
+    global_directives: "Global directives - your own rules, added for every target model",
+    system_prompt: "System prompt - the LLM card (loaded from the target model)",
+    user_prompt: "Your idea / message",
+    story_sheet: "Story sheet - written by the node while story mode is on",
+};
+// Boxes the LLM never sees while the node is switched off.
+const DIM_WHEN_OFF = ["global_directives", "system_prompt", "story_sheet"];
+
+const SETTINGS_LAYOUT = [
+    { title: "Connection", icon: "🔌", rows: [
+        { name: "base_url", label: "Server URL", kind: "text" },
+        { name: "api_key", label: "API key", kind: "text", password: true },
+        { name: "model", label: "Model", kind: "model" },
+        { kind: "status", label: "Server" },
+    ]},
+    { title: "Sampling", icon: "🎛️", rows: [
+        { name: "temperature", label: "Temperature", float: true, step: 0.01, slider: true },
+        { name: "top_p", label: "Top P", float: true, step: 0.01, slider: true },
+        { name: "top_k", label: "Top K" },
+        { name: "min_p", label: "Min P", float: true, step: 0.01, slider: true, pair: "enable_min_p" },
+        { name: "repeat_penalty", label: "Repeat penalty", float: true, step: 0.01, slider: true, pair: "enable_repeat_penalty" },
+        { name: "max_tokens", label: "Max tokens" },
+        { name: "seed", label: "Seed" },
+        { name: "control_after_generate", label: "Seed after run" },
+    ]},
+    { title: "Thinking", icon: "🧠", rows: [
+        { name: "thinking", label: "Thinking mode" },
+        { name: "strip_before_tag", label: "Strip before tag", kind: "text" },
+        { name: "no_think_model", label: "No-think model", kind: "text" },
+    ]},
+    { title: "Conversation memory", icon: "💬", rows: [
+        { name: "keep_history", label: "Keep history" },
+        { name: "max_history_turns", label: "History turns" },
+        { name: "reset_history", label: "Reset history" },
+    ]},
+    { title: "Server behaviour", icon: "🖥️", rows: [
+        { name: "timeout", label: "Timeout (s)" },
+        { name: "context_length", label: "Context length" },
+        { name: "context_slots", label: "Context slots" },
+        { name: "unload_after", label: "Unload model after" },
+        { name: "on_llm_offline", label: "If the LLM is offline" },
+    ]},
+    { title: "Pictures, video & audio", icon: "🖼️", rows: [
+        { name: "image_analysis_size", label: "Image size" },
+        { name: "video_role", label: "Video role" },
+        { name: "video_frame_size", label: "Video frame size" },
+        { name: "video_stride", label: "Video stride" },
+        { name: "video_max_frames", label: "Video max frames" },
+        { name: "video_fps", label: "Video FPS", float: true, step: 0.1 },
+        { name: "audio_role", label: "Audio role" },
+    ]},
+    { title: "System prompt", icon: "📥", rows: [
+        { kind: "preset", label: "Preset" },
+    ]},
+];
+
+// ----------------------------------------------------------------- hiding
+// Hidden = not drawn, no height. Reversible: the story buttons come and go
+// with story mode. `hidden` is what the current frontend reads; the zero
+// height keeps older layouts from reserving a row for it.
+function setHidden(w, hide) {
+    if (!w) return;
+    if (hide) {
+        if (w._cocoHidden) return;
+        w._cocoHidden = true;
+        w._cocoHadSize = Object.prototype.hasOwnProperty.call(w, "computeSize");
+        w._cocoSize = w.computeSize;
+        w._cocoHadOpt = !!w.options && "hidden" in w.options;
+        w._cocoOptHidden = w.options?.hidden;
+        w.computeSize = () => [0, -4];
+        w.hidden = true;
+        // A DOM widget (a text box) is a real element on the page: hide that
+        // too. Only its visibility changes - the text inside is never touched.
+        if (w.element?.style) {
+            w._cocoDisplay = w.element.style.display;
+            w.element.style.display = "none";
+        }
+        w.options = w.options || {};
+        w.options.hidden = true;
+    } else {
+        if (!w._cocoHidden) return;
+        w._cocoHidden = false;
+        if (w._cocoHadSize) w.computeSize = w._cocoSize;
+        else delete w.computeSize;
+        w.hidden = false;
+        if (w.element?.style) {
+            w.element.style.display = w._cocoDisplay || "";
+            // Coming back from height 0 is not the user resizing the box: the
+            // next size change only re-learns the height (see makeResizable).
+            w._cocoResync = true;
+            setTimeout(() => { w._cocoResync = false; }, 500);
+        }
+        if (w._cocoHadOpt) w.options.hidden = w._cocoOptHidden;
+        else if (w.options) delete w.options.hidden;
+    }
+}
+
+function isEnabled(node) {
+    const w = getWidget(node, "enabled");
+    return w ? !!w.value : true;
+}
+
+function setW(node, w, v) {
+    w.value = v;
+    try {
+        w.callback?.(v, app.canvas, node, null, null);
+    } catch (e) {
+        console.warn("[coco] callback of", w.name, "failed:", e);
+    }
+    node.graph?.setDirtyCanvas(true, true);
+}
+
+function later(node, key, fn, ms = 350) {
+    clearTimeout(node[key]);
+    node[key] = setTimeout(fn, ms);
+}
+
+function h(tag, cls, text) {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined) e.textContent = text;
+    return e;
+}
+
+// ------------------------------------------------------------------ styles
+const STYLE_ID = "coco-styles";
+function injectStyles() {
+    if (document.getElementById(STYLE_ID)) return;
+    const st = document.createElement("style");
+    st.id = STYLE_ID;
+    st.textContent = `
+.coco-bar{width:100%;height:100%;min-width:0;overflow:hidden;container-type:inline-size;box-sizing:border-box;display:flex;align-items:center;gap:6px;padding:0 2px;pointer-events:auto;font:12px/1.2 system-ui,sans-serif;color:var(--fg-color,#e6e7ea)}
+.coco-bar button{flex:none;white-space:nowrap;font:inherit;cursor:pointer;border-radius:999px;border:1px solid var(--border-color,#43464f);background:var(--comfy-input-bg,#2b2d33);color:inherit;padding:6px 10px;display:inline-flex;align-items:center;gap:6px;transition:background .15s,border-color .15s}
+.coco-bar button:hover{border-color:#6ea8fe;background:rgba(110,168,254,.12)}
+.coco-bar button:disabled{opacity:.45;cursor:default}
+.coco-bar button:disabled:hover{border-color:var(--border-color,#43464f);background:var(--comfy-input-bg,#2b2d33)}
+.coco-power .coco-led{width:9px;height:9px;border-radius:50%;background:#3ddc84;box-shadow:0 0 6px #3ddc84}
+.coco-bar.off .coco-power{border-color:#f5a524;background:rgba(245,165,36,.12)}
+.coco-bar.off .coco-power .coco-led{background:#f5a524;box-shadow:0 0 6px #f5a524}
+.coco-stat{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.75;display:flex;align-items:center;gap:6px}
+.coco-stat i{width:7px;height:7px;border-radius:50%;background:#888;flex:none}
+.coco-stat span{overflow:hidden;text-overflow:ellipsis}
+@container (max-width:400px){.coco-check .tx{display:none}}
+@container (max-width:330px){.coco-gear .tx,.coco-stat span{display:none}.coco-stat{flex:1 1 0}}
+@container (max-width:230px){.coco-ptext{display:none}}
+.coco-stat[data-state="true"] i{background:#3ddc84}
+.coco-stat[data-state="false"] i{background:#ff4d4d}
+.coco-stat[data-state="bypass"] i{background:#f5a524}
+textarea.coco-box{box-sizing:border-box;background:var(--comfy-input-bg,#1d1e22)!important;border:1px solid var(--border-color,#3a3d45)!important;border-radius:8px!important;padding:8px 10px!important;font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace!important;transition:border-color .15s,opacity .15s,box-shadow .15s}
+textarea.coco-box:focus{outline:none;border-color:#6ea8fe!important;box-shadow:0 0 0 2px rgba(110,168,254,.25)}
+.coco-ovl{position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,.55);backdrop-filter:blur(2px);display:flex;align-items:center;justify-content:center;font:13px/1.35 system-ui,sans-serif}
+.coco-dlg{width:min(600px,94vw);max-height:86vh;display:flex;flex-direction:column;background:var(--comfy-menu-bg,#202226);color:var(--fg-color,#e6e7ea);border:1px solid var(--border-color,#3a3d45);border-radius:14px;box-shadow:0 20px 60px rgba(0,0,0,.6);overflow:hidden}
+.coco-hd{display:flex;align-items:center;gap:10px;padding:14px 18px;border-bottom:1px solid var(--border-color,#3a3d45)}
+.coco-hd h3{margin:0;font-size:15px;font-weight:600;flex:1}
+.coco-x{cursor:pointer;border:0;background:transparent;color:inherit;font-size:18px;line-height:1;padding:4px 8px;border-radius:6px;opacity:.7}
+.coco-x:hover{opacity:1;background:rgba(255,255,255,.08)}
+.coco-body{overflow-y:auto;padding:12px 18px 6px}
+.coco-card{margin:0 0 12px;border:1px solid var(--border-color,#3a3d45);border-radius:10px;background:rgba(255,255,255,.025)}
+.coco-card>h4{margin:0;padding:9px 14px;font-size:11px;letter-spacing:.07em;text-transform:uppercase;opacity:.7;border-bottom:1px solid var(--border-color,#3a3d45)}
+.coco-row{display:flex;align-items:center;gap:14px;padding:8px 14px;min-height:34px}
+.coco-row+.coco-row{border-top:1px solid rgba(255,255,255,.05)}
+.coco-lbl{flex:0 0 38%;min-width:0}
+.coco-lbl small{display:block;opacity:.5;font-size:11px;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.coco-ctl{flex:1;min-width:0;display:flex;align-items:center;gap:8px;justify-content:flex-end}
+.coco-dlg input[type=text],.coco-dlg input[type=password],.coco-dlg input[type=number],.coco-dlg select{box-sizing:border-box;width:100%;background:var(--comfy-input-bg,#14151a);color:inherit;border:1px solid var(--border-color,#3a3d45);border-radius:7px;padding:6px 9px;font:inherit}
+.coco-dlg input[type=number]{width:96px;flex:none}
+.coco-dlg input:focus,.coco-dlg select:focus{outline:none;border-color:#6ea8fe}
+.coco-dlg input[type=range]{flex:1;accent-color:#6ea8fe}
+.coco-sw{position:relative;display:inline-block;width:38px;height:22px;flex:none}
+.coco-sw input{opacity:0;width:0;height:0}
+.coco-sw span{position:absolute;inset:0;border-radius:999px;background:#454851;cursor:pointer;transition:background .15s}
+.coco-sw span:before{content:"";position:absolute;width:16px;height:16px;left:3px;top:3px;border-radius:50%;background:#fff;transition:transform .15s}
+.coco-sw input:checked+span{background:#4c8dff}
+.coco-sw input:checked+span:before{transform:translateX(16px)}
+.coco-btn{cursor:pointer;border:1px solid var(--border-color,#43464f);background:var(--comfy-input-bg,#2b2d33);color:inherit;border-radius:7px;padding:6px 12px;font:inherit;white-space:nowrap}
+.coco-btn:hover{border-color:#6ea8fe;background:rgba(110,168,254,.12)}
+.coco-ft{padding:10px 18px;border-top:1px solid var(--border-color,#3a3d45);font-size:11px;opacity:.55}
+.coco-pair{display:flex;align-items:center;gap:6px;font-size:11px;opacity:.8}
+`;
+    document.head.appendChild(st);
+}
+
+// ----------------------------------------------------------------- the bar
+// The bar REPLACES the base_url widget, in its own slot (the same trick as the
+// model combo above): it is serialized under the name base_url and holds the
+// URL as its value, so the position and the saved value of every widget stay
+// as they were, and the top of the node is the one place left for it. The URL
+// itself is edited in the Settings dialog.
+function buildToolbar(node) {
+    const old = getWidget(node, "base_url");
+    if (!old || old._cocoBar || typeof node.addDOMWidget !== "function") return false;
+    try {
+        const bar = h("div", "coco-bar");
+        const power = h("button", "coco-power");
+        power.type = "button";
+        power.append(h("span", "coco-led"), h("span", "coco-ptext", "LLM on"));
+        power.title = "On: the prompt is written by the LLM. Off: user_prompt is " +
+            "sent straight to the prompt output, nothing goes to the LLM.";
+        const stat = h("span", "coco-stat");
+        stat.append(h("i"), h("span", "coco-stxt", "checking…"));
+        const check = h("button", "coco-check");
+        check.type = "button";
+        check.append(h("span", "ic", "↻"), h("span", "tx", "Check server"));
+        const gear = h("button", "coco-gear");
+        gear.type = "button";
+        gear.title = "Settings";
+        gear.append(h("span", "ic", "⚙"), h("span", "tx", "Settings"));
+        bar.append(power, stat, check, gear);
+
+        let url = String(old.value ?? "").trim() || "http://localhost:1234/v1";
+        const i = node.widgets.indexOf(old);
+        const w = node.addDOMWidget("base_url", "cocoBar", bar, {
+            getValue: () => url,
+            setValue: (v) => { url = String(v ?? ""); },
+            getMinHeight: () => BAR_H + 8,
+            getMaxHeight: () => BAR_H + 8,
+            margin: 4,
+        });
+        if (node.widgets[node.widgets.length - 1] !== w) {
+            // Not where addDOMWidget is expected to leave it: do not guess.
+            const at = node.widgets.indexOf(w);
+            if (at >= 0) node.widgets.splice(at, 1);
+            return false;
+        }
+        node.widgets.pop();
+        node.widgets.splice(i, 1, w);
+        w._cocoBar = true;
+        w.computeSize = (width) => [width, BAR_H + 8];
+        old.onRemove?.();
+
+        node._cocoBarEl = bar;
+        power.addEventListener("click", () => {
+            const ew = getWidget(node, "enabled");
+            if (!ew) return;
+            setW(node, ew, !ew.value);
+            syncBar(node, true);
+        });
+        gear.addEventListener("click", () => openSettings(node));
+        check.addEventListener("click", () => refreshStatus(node, true));
+        if (!getWidget(node, "enabled")) power.style.display = "none";
+        return true;
+    } catch (e) {
+        console.warn("[coco] could not build the toolbar:", e);
+        return false;
+    }
+}
+
+function statusText(node, on) {
+    if (!on) return ["bypass", "Prompt passes straight through"];
+    if (node._llmChecking) return ["undefined", "Checking…"];
+    if (node._llmOnline === true) return ["true", "Online"];
+    if (node._llmOnline === false) return ["false", "Offline"];
+    return ["undefined", "Not checked"];
+}
+
+function syncBar(node, force = false) {
+    const bar = node._cocoBarEl;
+    if (!bar) return;
+    const on = isEnabled(node);
+    const key = on + "|" + node._llmOnline + "|" + !!node._llmChecking;
+    if (!force && node._cocoBarKey === key) return;
+    node._cocoBarKey = key;
+    bar.classList.toggle("off", !on);
+    bar.querySelector(".coco-ptext").textContent = on ? "LLM on" : "LLM off";
+    const cb = bar.querySelector(".coco-check");
+    cb.disabled = !on || !!node._llmChecking;
+    cb.title = on ? "Ask the LLM server whether it is up (nothing else is checked automatically)"
+                  : "Switch the LLM on to check the server";
+    const [state, text] = statusText(node, on);
+    const stat = bar.querySelector(".coco-stat");
+    stat.dataset.state = state;
+    bar.querySelector(".coco-stxt").textContent = text;
+    stat.title = on ? "LLM server: " + text.toLowerCase() : text;
+    for (const name of DIM_WHEN_OFF) {
+        const el = getWidget(node, name)?.element;
+        if (el) el.style.opacity = on ? "" : "0.4";
+    }
+    app.graph?.setDirtyCanvas(true, false);
+}
+
+// Story buttons only matter while story mode is on.
+function syncStoryButtons(node) {
+    const on = !!getWidget(node, "story_mode")?.value;
+    if (node._cocoStoryOn === on) return;
+    node._cocoStoryOn = on;
+    for (const b of node._cocoStoryBtns || []) setHidden(b, !on);
+    // The sheet box shows only in story mode. Its text stays in the widget (and
+    // in the saved workflow) either way; a run in story mode still writes to it.
+    setHidden(getWidget(node, "story_sheet"), !on);
+    if (on && node.computeSize) {
+        const need = node.computeSize()[1];
+        if (need > node.size[1]) node.setSize([node.size[0], need]);
+    }
+    app.graph?.setDirtyCanvas(true, true);
+}
+
+// Called every redraw: cheap comparisons only, the work is deferred.
+function syncUI(node) {
+    const key = isEnabled(node) + "|" + node._llmOnline + "|" + !!node._llmChecking + "|" +
+        !!getWidget(node, "story_mode")?.value;
+    if (node._cocoUIKey === key) return;
+    node._cocoUIKey = key;
+    setTimeout(() => {
+        syncBar(node);
+        syncStoryButtons(node);
+    }, 0);
+}
+
+// ------------------------------------------------------------ applying it
+function applyCompactUI(node, barOK) {
+    // Without the bar there is nowhere to put the switch: leave the server URL
+    // and the switch where the node always had them, and add a button.
+    const names = HIDDEN_NAMES.filter((n) => barOK || n !== "enabled");
+    for (const n of names) setHidden(getWidget(node, n), true);
+    const btns = node._cocoBtns || {};
+    setHidden(btns.refresh, true);
+    setHidden(btns.preset, true);
+    node._cocoStoryBtns = [btns.newStory, btns.undo].filter(Boolean);
+    for (const b of node._cocoStoryBtns) setHidden(b, true);
+    node._cocoStoryOn = false;
+    setHidden(getWidget(node, "story_sheet"), true);
+    if (!barOK) {
+        dontSerialize(node.addWidget("button", "⚙ Settings", null, () => openSettings(node)));
+    }
+}
+
+// After configure(): the saved values and heights are back.
+function finishCompactUI(node) {
+    for (const [name, text] of Object.entries(BOX_HINTS)) {
+        const el = getWidget(node, name)?.element;
+        if (!el || el.tagName !== "TEXTAREA") continue;
+        el.classList.add("coco-box");
+        el.placeholder = text;
+        el.title = text;
+    }
+    node._cocoBarKey = undefined;
+    node._cocoUIKey = null;
+    syncBar(node, true);
+    syncStoryButtons(node);
+    // First time this layout meets a node (new, or saved by an older version):
+    // shrink it to what is left. Never again, so a size the user sets stays.
+    if (!node.properties) node.properties = {};
+    if (node.properties.cocoLayout !== 2) {
+        node.properties.cocoLayout = 2;
+        setTimeout(() => {
+            try {
+                const need = node.computeSize()[1] + 10;
+                node.setSize([Math.max(node.size[0], 420), need]);
+                app.graph?.setDirtyCanvas(true, true);
+            } catch (e) {
+                console.warn("[coco] could not fit the node:", e);
+            }
+        }, 350);
+    }
+}
+
+// --------------------------------------------------------- settings dialog
+let openDialog = null;
+
+function closeSettings() {
+    if (!openDialog) return;
+    document.removeEventListener("keydown", openDialog.onKey, true);
+    openDialog.overlay.remove();
+    openDialog = null;
+}
+
+function hintOf(w) {
+    const t = String(w?.tooltip || w?.options?.tooltip || "").replace(/\s+/g, " ").trim();
+    if (!t) return "";
+    const first = t.split(/(?<=[.!?])\s/)[0];
+    return first.length > 120 ? first.slice(0, 117) + "…" : first;
+}
+
+function numberControl(node, w, row, sync) {
+    const o = w.options || {};
+    const wrap = h("div", "coco-ctl");
+    const num = h("input");
+    num.type = "number";
+    if (o.min != null) num.min = o.min;
+    if (o.max != null) num.max = o.max;
+    num.step = row.step ?? (row.float ? 0.01 : 1);
+    let rng = null;
+    if (row.slider && o.min != null && o.max != null) {
+        rng = h("input");
+        rng.type = "range";
+        rng.min = o.min;
+        rng.max = o.max;
+        rng.step = num.step;
+        wrap.append(rng);
+    }
+    wrap.append(num);
+    const commit = (raw) => {
+        let v = parseFloat(raw);
+        if (Number.isFinite(v)) {
+            if (o.min != null) v = Math.max(o.min, v);
+            if (o.max != null) v = Math.min(o.max, v);
+            v = row.float ? Math.round(v * 1000) / 1000 : Math.round(v);
+            setW(node, w, v);
+        }
+        sync();
+    };
+    num.addEventListener("change", () => commit(num.value));
+    if (rng) {
+        rng.addEventListener("input", () => { num.value = rng.value; });
+        rng.addEventListener("change", () => commit(rng.value));
+    }
+    return { el: wrap, sync: () => {
+        num.value = w.value;
+        if (rng) rng.value = w.value;
+    }};
+}
+
+function toggleControl(node, w) {
+    const lab = h("label", "coco-sw");
+    const cb = h("input");
+    cb.type = "checkbox";
+    lab.append(cb, h("span"));
+    cb.addEventListener("change", () => setW(node, w, cb.checked));
+    return { el: lab, sync: () => { cb.checked = !!w.value; } };
+}
+
+function comboControl(node, w, sync) {
+    const sel = h("select");
+    const valuesOf = () => {
+        const v = w.options?.values;
+        const list = typeof v === "function" ? v(w, node) : v;
+        return Array.isArray(list) ? list.map(String) : [];
+    };
+    sel.addEventListener("change", () => {
+        setW(node, w, sel.value);
+        sync();
+    });
+    return { el: sel, sync: () => {
+        const list = valuesOf();
+        const cur = String(w.value ?? "");
+        if (cur && !list.includes(cur)) list.push(cur);
+        const sig = list.join("\n");
+        if (sel._sig !== sig) {
+            sel.replaceChildren(...list.map((v) => {
+                const o = h("option", "", v);
+                o.value = v;
+                return o;
+            }));
+            sel._sig = sig;
+        }
+        sel.value = cur;
+    }};
+}
+
+function textControl(node, w, row) {
+    const inp = h("input");
+    inp.type = row.password ? "password" : "text";
+    inp.spellcheck = false;
+    inp.addEventListener("change", () => setW(node, w, inp.value.trim()));
+    return { el: inp, sync: () => { inp.value = String(w.value ?? ""); } };
+}
+
+function openSettings(node) {
+    closeSettings();
+    injectStyles();
+    const overlay = h("div", "coco-ovl");
+    const dlg = h("div", "coco-dlg");
+    overlay.append(dlg);
+
+    const hd = h("div", "coco-hd");
+    hd.append(h("h3", "", "⚙ coco settings"));
+    const x = h("button", "coco-x", "✕");
+    x.type = "button";
+    x.title = "Close (Esc)";
+    hd.append(x);
+    const body = h("div", "coco-body");
+    const ft = h("div", "coco-ft",
+        "Changes apply immediately and are saved with the workflow. " +
+        "The text boxes and the story toggle stay on the node.");
+    dlg.append(hd, body, ft);
+
+    const syncers = [];
+    const syncAll = () => syncers.forEach((f) => f());
+
+    for (const sec of SETTINGS_LAYOUT) {
+        const card = h("div", "coco-card");
+        card.append(h("h4", "", sec.icon + "  " + sec.title));
+        let count = 0;
+        for (const row of sec.rows) {
+            const w = row.name ? getWidget(node, row.name) : null;
+            if (row.name && !w) continue;   // an older backend without it
+            const line = h("div", "coco-row");
+            const lbl = h("div", "coco-lbl");
+            lbl.append(h("div", "", row.label));
+            const hint = hintOf(w);
+            if (hint) {
+                const s = h("small", "", hint);
+                s.title = String(w.tooltip || w.options?.tooltip || "");
+                lbl.append(s);
+            }
+            const ctl = h("div", "coco-ctl");
+            line.append(lbl, ctl);
+
+            const add = (c) => { ctl.append(c.el); syncers.push(c.sync); c.sync(); };
+            if (row.kind === "status") {
+                const st = h("span", "coco-stat");
+                st.append(h("i"), h("span", "", ""));
+                const btn = h("button", "coco-btn", "Check");
+                btn.type = "button";
+                btn.addEventListener("click", () => refreshStatus(node, true).then(syncAll));
+                ctl.append(st, btn);
+                syncers.push(() => {
+                    const [state, text] = statusText(node, isEnabled(node));
+                    st.dataset.state = state;
+                    st.lastChild.textContent = text;
+                });
+            } else if (row.kind === "preset") {
+                const btn = h("button", "coco-btn", "📥 Load preset for the target model");
+                btn.type = "button";
+                btn.title = "Replaces the system prompt box with the preset of the selected target model.";
+                btn.addEventListener("click", () => node._cocoApplyTemplate?.());
+                ctl.append(btn);
+            } else if (row.kind === "model") {
+                add(comboControl(node, w, syncAll));
+                const btn = h("button", "coco-btn", "🔄");
+                btn.type = "button";
+                btn.title = "Re-read the model list from the server";
+                btn.addEventListener("click", async () => {
+                    await Promise.all([detectModel(node), refreshStatus(node, true)]);
+                    syncAll();
+                });
+                ctl.append(btn);
+            } else if (row.kind === "text") {
+                add(textControl(node, w, row));
+            } else if (w.type === "combo") {
+                add(comboControl(node, w, syncAll));
+            } else if (typeof w.value === "boolean") {
+                add(toggleControl(node, w));
+            } else if (w.type === "number" || typeof w.value === "number") {
+                add(numberControl(node, w, row, syncAll));
+            } else {
+                add(textControl(node, w, row));
+            }
+
+            const pw = row.pair ? getWidget(node, row.pair) : null;
+            if (pw) {
+                const pair = h("div", "coco-pair");
+                const t = toggleControl(node, pw);
+                pair.append(t.el);
+                pair.title = hintOf(pw) || "Send this value to the server";
+                ctl.append(pair);
+                syncers.push(t.sync);
+                t.sync();
+            }
+            card.append(line);
+            count++;
+        }
+        if (count) body.append(card);
+    }
+
+    const onKey = (e) => {
+        if (e.key === "Escape") {
+            e.stopPropagation();
+            closeSettings();
+        }
+    };
+    document.addEventListener("keydown", onKey, true);
+    overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) closeSettings(); });
+    x.addEventListener("click", closeSettings);
+    document.body.appendChild(overlay);
+    openDialog = { overlay, onKey };
+}
+
+
 app.registerExtension({
     name: "comfy.LLMPromptStudio",
     async setup() {
-        startStatusPolling();
+        injectStyles();
         await loadTemplates();
     },
     async beforeConfigureGraph(graphData) {
@@ -581,12 +1193,14 @@ app.registerExtension({
             // Turn `model` into a dropdown, in its own slot. Done before
             // configure() runs, so a saved value lands straight in the combo.
             swapModelToCombo(node);
+            // The bar takes the slot of base_url (top of the node).
+            const barOK = buildToolbar(node);
 
             const detectBtn = node.addWidget(
                 "button",
                 "🔄 Refresh the model list",
                 null,
-                () => detectModel(node)
+                () => { detectModel(node); refreshStatus(node, true); }
             );
             dontSerialize(detectBtn);
 
@@ -597,8 +1211,11 @@ app.registerExtension({
                 const orig = w.callback;
                 w.callback = function () {
                     const r = orig?.apply(this, arguments);
-                    detectModel(node);
-                    refreshStatus(node, true);
+                    // Another server: what was known about the old one no
+                    // longer holds. Nothing is requested - the dot goes grey
+                    // until a refresh button or a run says otherwise.
+                    node._llmOnline = undefined;
+                    app.graph?.setDirtyCanvas(true, false);
                     return r;
                 };
             }
@@ -622,10 +1239,11 @@ app.registerExtension({
                 applyTemplate
             );
             dontSerialize(presetBtn);
+            node._cocoApplyTemplate = applyTemplate;
 
-            dontSerialize(node.addWidget("button", "🆕 New story (empty the sheet)",
+            const newBtn = dontSerialize(node.addWidget("button", "🆕 New story (empty the sheet)",
                 null, () => setStorySheet(node, "")));
-            dontSerialize(node.addWidget("button", "↩ Undo the last sheet change",
+            const undoBtn = dontSerialize(node.addWidget("button", "↩ Undo the last sheet change",
                 null, () => {
                     if (node._prevSheet === undefined) {
                         toast("info", "Story sheet", "Nothing to undo yet.");
@@ -633,6 +1251,12 @@ app.registerExtension({
                     }
                     setStorySheet(node, node._prevSheet);
                 }));
+
+            // Everything but the text boxes, target_model and the story toggle
+            // goes behind the Settings dialog.
+            node._cocoBtns = { refresh: detectBtn, preset: presetBtn,
+                               newStory: newBtn, undo: undoBtn };
+            applyCompactUI(node, barOK);
 
             // Auto-load the matching preset into the system prompt box on change.
             const tw = getWidget(node, "target_model");
@@ -654,12 +1278,14 @@ app.registerExtension({
                 // A saved name is kept as the selected entry; the list around
                 // it is refreshed either way. Auto stays the default pick.
                 normalizeModel(node);
-                detectModel(node);
                 // After configure(), so a saved workflow's box heights are back.
                 makeAllResizable(node);
+                finishCompactUI(node);
                 // Same reason: a workflow using image_6 must have its wires
                 // restored before the empty sockets around them are trimmed.
                 syncPictureSlots(node);
+                // The one automatic check: once, as the node appears (the
+                // model list is NOT fetched; the 🔄 button does that).
                 refreshStatus(node);
             }, 250);
 
@@ -700,7 +1326,8 @@ app.registerExtension({
             ctx.save();
             ctx.beginPath();
             ctx.arc(this.size[0] - h / 2, -h / 2, 5, 0, Math.PI * 2);
-            ctx.fillStyle = DOT_COLORS[this._llmOnline];
+            ctx.fillStyle = isEnabled(this) ? DOT_COLORS[this._llmOnline] : "#f5a524";
+            syncUI(this);
             ctx.fill();
             ctx.lineWidth = 1;
             ctx.strokeStyle = "rgba(0, 0, 0, 0.5)";
@@ -742,9 +1369,11 @@ app.registerExtension({
                     app
                 ).widget;
                 dontSerialize(w); // preview only: saved nowhere, sent nowhere
-                if (w.inputEl) {
-                    w.inputEl.readOnly = true;
-                    w.inputEl.style.opacity = "0.85";
+                const gel = w.element || w.inputEl;
+                if (gel) {
+                    gel.readOnly = true;
+                    gel.style.opacity = "0.85";
+                    gel.classList.add("coco-box");
                 }
             }
             w.value = value;
