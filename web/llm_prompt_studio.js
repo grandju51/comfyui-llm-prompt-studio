@@ -3,6 +3,9 @@ import { api } from "../../scripts/api.js";
 import { ComfyWidgets } from "../../scripts/widgets.js";
 
 const NODE_NAME = "LLMPromptStudio";
+// coco2 is the same node with its rarely-touched settings folded away, so it
+// gets every behaviour below too.
+const NODE_NAMES = new Set([NODE_NAME, "LLMPromptStudio2"]);
 // Both draw whatever the run sent back: the count alone for the simple one,
 // the count plus the text it counted for the other.
 const PREVIEW_NODES = new Set(["LLMTextTokenPreview", "LLMTokenCount"]);
@@ -202,6 +205,14 @@ function serverStatus(base, key, force = false) {
 }
 
 async function refreshStatus(node, force = false) {
+    // LLM switched off (coco2): nothing to ask, the dot goes grey.
+    if (getWidget(node, "enabled")?.value === false) {
+        if (node._llmOnline !== undefined) {
+            node._llmOnline = undefined;
+            app.graph?.setDirtyCanvas(true, false);
+        }
+        return;
+    }
     const base = getWidget(node, "base_url")?.value || "http://localhost:1234/v1";
     const key = getWidget(node, "api_key")?.value || "";
     const online = await serverStatus(base, key, force);
@@ -216,7 +227,7 @@ function startStatusPolling() {
     statusTimer = setInterval(() => {
         if (document.visibilityState !== "visible") return;
         for (const node of app.graph?._nodes || []) {
-            if ((node.comfyClass || node.type) === NODE_NAME) refreshStatus(node);
+            if (NODE_NAMES.has(node.comfyClass || node.type)) refreshStatus(node);
         }
     }, STATUS_EVERY_MS);
 }
@@ -243,6 +254,40 @@ function setStorySheet(node, text) {
     node._prevSheet = String(w.value ?? "");
     w.value = next;
     app.graph?.setDirtyCanvas(true, true);
+}
+
+// ----------------------------------------------------------- folded settings
+// coco2 declares its rarely-touched settings "advanced" (nodes.py, _FOLDED).
+// Nodes 2.0 and the side panel fold those by themselves, behind their own
+// "show advanced" button. The classic canvas does not: it draws nothing for
+// them but still lays out their rows, which leaves holes in the node. So on the
+// classic canvas they are hidden instead - a hidden widget gives its row back -
+// and a button shows them again. They stay in the workflow and in what is sent
+// to the backend either way: hiding only concerns the drawing. Whether they are
+// shown is kept in node.properties, which the workflow saves.
+function foldAdvanced(node) {
+    if (globalThis.LiteGraph?.vueNodesMode) return;
+    const folded = (node.widgets || []).filter((w) => w.options?.advanced);
+    if (!folded.length) return;
+    if (!node.properties) node.properties = {};
+    const shown = () => !!node.properties.cocoShowAdvanced;
+    const label = () => (shown()
+        ? "⚙ Hide the advanced settings"
+        : "⚙ Show the advanced settings (" + folded.length + ")");
+    const apply = (resize) => {
+        for (const w of folded) w.hidden = !shown();
+        btn.name = label();
+        // Showing grows the node on its own; hiding has to shrink it.
+        if (resize && !shown()) node.setSize([node.size[0], node.computeSize()[1]]);
+        app.graph?.setDirtyCanvas(true, true);
+    };
+    const btn = dontSerialize(node.addWidget("button", label(), null, () => {
+        node.properties.cocoShowAdvanced = !shown();
+        apply(true);
+    }));
+    // A saved workflow restores node.properties after this runs.
+    node._cocoApplyFold = () => apply(false);
+    apply(true);
 }
 
 // ------------------------------------------------------------- resizable boxes
@@ -443,14 +488,15 @@ function syncPictureSlots(node) {
 // the frontend itself goes by. The order is read off a throwaway node, so it
 // is the real one rather than a guess at it.
 let probing = false;
-let definedOrder = null;
+const definedOrders = new Map();
 
-function definedInputs() {
-    if (definedOrder) return definedOrder;
+function definedInputs(type) {
+    if (definedOrders.has(type)) return definedOrders.get(type);
+    let order = null;
     try {
         probing = true;
-        const probe = globalThis.LiteGraph?.createNode(NODE_NAME);
-        definedOrder = probe?.inputs?.map((i) => ({
+        const probe = globalThis.LiteGraph?.createNode(type);
+        order = probe?.inputs?.map((i) => ({
             name: i.name,
             type: i.type,
             widget: i.widget ? { name: i.widget.name } : undefined,
@@ -460,7 +506,8 @@ function definedInputs() {
     } finally {
         probing = false;
     }
-    return definedOrder;
+    definedOrders.set(type, order);
+    return order;
 }
 
 function linkTarget(link) {
@@ -472,10 +519,12 @@ function setLinkSlot(link, slot) {
     else link.target_slot = slot;
 }
 
-function realignGraph(graph, defined) {
+function realignGraph(graph) {
     const byNode = new Map();
     for (const node of graph?.nodes || []) {
-        if (node?.type !== NODE_NAME || !Array.isArray(node.inputs)) continue;
+        if (!NODE_NAMES.has(node?.type) || !Array.isArray(node.inputs)) continue;
+        const defined = definedInputs(node.type);
+        if (!defined) continue;
         const saved = new Map(node.inputs.map((inp) => [inp.name, inp]));
         const definedNames = new Set(defined.map((d) => d.name));
         const ordered = defined
@@ -503,11 +552,10 @@ function realignGraph(graph, defined) {
 
 function realignWorkflow(graphData) {
     try {
-        const defined = definedInputs();
-        if (!defined || !graphData) return;
-        let moved = realignGraph(graphData, defined);
+        if (!graphData) return;
+        let moved = realignGraph(graphData);
         for (const sub of graphData.definitions?.subgraphs || []) {
-            moved += realignGraph(sub, defined);
+            moved += realignGraph(sub);
         }
         if (moved) console.info("[coco] realigned %d wire(s) on reopening", moved);
     } catch (e) {
@@ -569,7 +617,7 @@ app.registerExtension({
             return;
         }
 
-        if (nodeData.name !== NODE_NAME) return;
+        if (!NODE_NAMES.has(nodeData.name)) return;
 
         const onNodeCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
@@ -589,6 +637,17 @@ app.registerExtension({
                 () => detectModel(node)
             );
             dontSerialize(detectBtn);
+
+            // coco2's LLM switch: the dot follows it straight away.
+            const sw = getWidget(node, "enabled");
+            if (sw) {
+                const orig = sw.callback;
+                sw.callback = function () {
+                    const r = orig?.apply(this, arguments);
+                    refreshStatus(node, true);
+                    return r;
+                };
+            }
 
             // Pointing at another server must not keep offering the old list.
             for (const name of ["base_url", "api_key"]) {
@@ -622,6 +681,7 @@ app.registerExtension({
                 applyTemplate
             );
             dontSerialize(presetBtn);
+            foldAdvanced(node);
 
             dontSerialize(node.addWidget("button", "🆕 New story (empty the sheet)",
                 null, () => setStorySheet(node, "")));
@@ -661,6 +721,8 @@ app.registerExtension({
                 // restored before the empty sockets around them are trimmed.
                 syncPictureSlots(node);
                 refreshStatus(node);
+                // A saved workflow may reopen with them shown.
+                node._cocoApplyFold?.();
             }, 250);
 
             return ret;
@@ -721,6 +783,8 @@ app.registerExtension({
                 node._llmOnline = false;
                 toast("warn", "LLM offline",
                       Array.isArray(offline) ? offline.join("") : String(offline));
+            } else if (message?.llm_disabled) {
+                node._llmOnline = undefined;
             } else if (message?.text !== undefined) {
                 node._llmOnline = true;
             }

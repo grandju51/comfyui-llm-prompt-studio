@@ -1693,7 +1693,21 @@ class LLMPromptStudio:
                  enable_repeat_penalty=True, unload_after=False,
                  context_length=0, context_slots=0,
                  on_llm_offline=OFFLINE_MODES[0], story_mode=False,
-                 story_sheet="", reference_map="", **pictures):
+                 story_sheet="", reference_map="", enabled=True, **pictures):
+
+        # 00) LLM switched off (coco2's `enabled`): no request at all, the idea
+        #    goes through as the prompt. Ctrl+B does not do this - a bypassed
+        #    node hands its outputs the first input of the same type, which is
+        #    not user_prompt - and there is no Ctrl+B for a workflow driven
+        #    through the API.
+        if not enabled:
+            text = user_prompt or ""
+            sheet = (story_sheet or "").strip() if story_mode else ""
+            print("[LLMPromptStudio] LLM switched off: user_prompt passed through")
+            return {"ui": {"text": ["⏻ LLM OFF - user_prompt passed through "
+                                    "unchanged\n\n" + text],
+                           "llm_disabled": [True]},
+                    "result": (text, text, sheet)}
 
         # 0) the same story request on the same seed, with the sheet the last
         #    run wrote: that run's answer, without asking again (_STORY_MEMO).
@@ -2015,5 +2029,46 @@ class LLMPromptStudio:
         return out
 
 
-NODE_CLASS_MAPPINGS = {"LLMPromptStudio": LLMPromptStudio}
-NODE_DISPLAY_NAME_MAPPINGS = {"LLMPromptStudio": "coco"}
+# coco2: the very same node, with the settings one rarely touches folded behind
+# the frontend's own "advanced" toggle instead of a hand-made settings panel.
+# What stays in view is what a prompt is written with; the rest is one click
+# away and keeps working exactly as on coco.
+_FOLDED = (
+    "top_p", "top_k", "min_p", "enable_min_p", "repeat_penalty",
+    "enable_repeat_penalty", "strip_before_tag", "max_history_turns",
+    "reset_history", "timeout", "image_analysis_size", "api_key",
+    "no_think_model", "audio_role", "video_stride", "video_max_frames",
+    "video_frame_size", "video_fps", "video_role", "unload_after",
+    "context_length", "context_slots", "on_llm_offline",
+)
+
+
+class LLMPromptStudio2(LLMPromptStudio):
+    """coco with its rarely-touched settings folded away."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        spec = super().INPUT_TYPES()
+        for section in ("required", "optional"):
+            block = spec[section]
+            for name in _FOLDED:
+                if not dict.__contains__(block, name):
+                    continue
+                entry = block[name]
+                opts = dict(entry[1]) if len(entry) > 1 else {}
+                opts["advanced"] = True
+                block[name] = (entry[0], opts) + tuple(entry[2:])
+        # Last of all, so it is the last widget: widgets_values is positional.
+        spec["optional"]["enabled"] = ("BOOLEAN", {"default": True,
+            "label_on": "LLM: on", "label_off": "LLM: off - user_prompt passed through",
+            "tooltip": "Off: the LLM is never called, and user_prompt goes out "
+                       "unchanged as prompt and raw_response (story_sheet as it "
+                       "is). Unlike Ctrl+B, it outputs your text, and it can be "
+                       "set from the API."})
+        return spec
+
+
+NODE_CLASS_MAPPINGS = {"LLMPromptStudio": LLMPromptStudio,
+                       "LLMPromptStudio2": LLMPromptStudio2}
+NODE_DISPLAY_NAME_MAPPINGS = {"LLMPromptStudio": "coco",
+                              "LLMPromptStudio2": "coco2"}
