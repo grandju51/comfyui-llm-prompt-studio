@@ -1369,7 +1369,7 @@ class LLMPromptStudio:
     RETURN_NAMES = ("prompt", "raw_response", "story_sheet")
 
     @classmethod
-    def INPUT_TYPES(cls):
+    def _base_spec(cls):
         spec = {
             "required": {
                 # --- connection ---
@@ -1671,6 +1671,31 @@ class LLMPromptStudio:
         spec["optional"] = _PictureSlots(optional)
         return spec
 
+    @classmethod
+    def INPUT_TYPES(cls):
+        spec = cls._base_spec()
+        # The settings one rarely touches are folded behind the frontend's
+        # "advanced" toggle (the classic canvas: see foldAdvanced in the JS).
+        # Folding is drawing only: they are still saved and sent.
+        for section in ("required", "optional"):
+            block = spec[section]
+            for name in _FOLDED:
+                if not dict.__contains__(block, name):
+                    continue
+                entry = block[name]
+                opts = dict(entry[1]) if len(entry) > 1 else {}
+                opts["advanced"] = True
+                block[name] = (entry[0], opts) + tuple(entry[2:])
+        # Last of all, so it is the last widget: widgets_values is positional,
+        # and optional with a default, so an API prompt without it still runs.
+        spec["optional"]["enabled"] = ("BOOLEAN", {"default": True,
+            "label_on": "LLM: on", "label_off": "LLM: off - user_prompt passed through",
+            "tooltip": "Off: the LLM is never called, and user_prompt goes out "
+                       "unchanged as prompt and raw_response (story_sheet as it "
+                       "is). Unlike Ctrl+B, it outputs your text, and it can be "
+                       "set from the API."})
+        return spec
+
     # Always re-run when the seed changes (control_after_generate); fixed seed = cached.
     @classmethod
     def IS_CHANGED(cls, seed=0, unique_id=None, **kwargs):
@@ -1695,7 +1720,7 @@ class LLMPromptStudio:
                  on_llm_offline=OFFLINE_MODES[0], story_mode=False,
                  story_sheet="", reference_map="", enabled=True, **pictures):
 
-        # 00) LLM switched off (coco2's `enabled`): no request at all, the idea
+        # 00) LLM switched off (`enabled`): no request at all, the idea
         #    goes through as the prompt. Ctrl+B does not do this - a bypassed
         #    node hands its outputs the first input of the same type, which is
         #    not user_prompt - and there is no Ctrl+B for a workflow driven
@@ -2029,10 +2054,7 @@ class LLMPromptStudio:
         return out
 
 
-# coco2: the very same node, with the settings one rarely touches folded behind
-# the frontend's own "advanced" toggle instead of a hand-made settings panel.
-# What stays in view is what a prompt is written with; the rest is one click
-# away and keeps working exactly as on coco.
+# Settings one rarely touches, folded away on the node (INPUT_TYPES).
 _FOLDED = (
     "top_p", "top_k", "min_p", "enable_min_p", "repeat_penalty",
     "enable_repeat_penalty", "strip_before_tag", "max_history_turns",
@@ -2043,32 +2065,5 @@ _FOLDED = (
 )
 
 
-class LLMPromptStudio2(LLMPromptStudio):
-    """coco with its rarely-touched settings folded away."""
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        spec = super().INPUT_TYPES()
-        for section in ("required", "optional"):
-            block = spec[section]
-            for name in _FOLDED:
-                if not dict.__contains__(block, name):
-                    continue
-                entry = block[name]
-                opts = dict(entry[1]) if len(entry) > 1 else {}
-                opts["advanced"] = True
-                block[name] = (entry[0], opts) + tuple(entry[2:])
-        # Last of all, so it is the last widget: widgets_values is positional.
-        spec["optional"]["enabled"] = ("BOOLEAN", {"default": True,
-            "label_on": "LLM: on", "label_off": "LLM: off - user_prompt passed through",
-            "tooltip": "Off: the LLM is never called, and user_prompt goes out "
-                       "unchanged as prompt and raw_response (story_sheet as it "
-                       "is). Unlike Ctrl+B, it outputs your text, and it can be "
-                       "set from the API."})
-        return spec
-
-
-NODE_CLASS_MAPPINGS = {"LLMPromptStudio": LLMPromptStudio,
-                       "LLMPromptStudio2": LLMPromptStudio2}
-NODE_DISPLAY_NAME_MAPPINGS = {"LLMPromptStudio": "coco",
-                              "LLMPromptStudio2": "coco2"}
+NODE_CLASS_MAPPINGS = {"LLMPromptStudio": LLMPromptStudio}
+NODE_DISPLAY_NAME_MAPPINGS = {"LLMPromptStudio": "coco"}

@@ -3,9 +3,7 @@ import { api } from "../../scripts/api.js";
 import { ComfyWidgets } from "../../scripts/widgets.js";
 
 const NODE_NAME = "LLMPromptStudio";
-// coco2 is the same node with its rarely-touched settings folded away, so it
-// gets every behaviour below too.
-const NODE_NAMES = new Set([NODE_NAME, "LLMPromptStudio2"]);
+const NODE_NAMES = new Set([NODE_NAME]);
 // Both draw whatever the run sent back: the count alone for the simple one,
 // the count plus the text it counted for the other.
 const PREVIEW_NODES = new Set(["LLMTextTokenPreview", "LLMTokenCount"]);
@@ -205,7 +203,7 @@ function serverStatus(base, key, force = false) {
 }
 
 async function refreshStatus(node, force = false) {
-    // LLM switched off (coco2): nothing to ask, the dot goes grey.
+    // LLM switched off: nothing to ask, the dot goes grey.
     if (getWidget(node, "enabled")?.value === false) {
         if (node._llmOnline !== undefined) {
             node._llmOnline = undefined;
@@ -257,7 +255,7 @@ function setStorySheet(node, text) {
 }
 
 // ----------------------------------------------------------- folded settings
-// coco2 declares its rarely-touched settings "advanced" (nodes.py, _FOLDED).
+// coco declares its rarely-touched settings "advanced" (nodes.py, _FOLDED).
 // Nodes 2.0 and the side panel fold those by themselves, behind their own
 // "show advanced" button. The classic canvas does not: it draws nothing for
 // them but still lays out their rows, which leaves holes in the node. So on the
@@ -287,6 +285,35 @@ function foldAdvanced(node) {
     }));
     // A saved workflow restores node.properties after this runs.
     node._cocoApplyFold = () => apply(false);
+    apply(true);
+}
+
+// The story sheet and its two buttons are of no use while story mode
+// is off, so they are hidden then. Hidden, not emptied: the sheet keeps its
+// text, is saved with the workflow and still reaches the backend.
+function foldStory(node, buttons) {
+    const sw = getWidget(node, "story_mode");
+    if (!sw) return;
+    const apply = (resize) => {
+        const on = !!sw.value;
+        for (const w of [getWidget(node, "story_sheet"), ...buttons]) {
+            if (w) w.hidden = !on;
+        }
+        // Hiding shrinks the node; showing grows it back, or the sheet would
+        // only get the space the other boxes leave over.
+        if (resize) {
+            const need = node.computeSize()[1];
+            node.setSize([node.size[0], on ? Math.max(node.size[1], need) : need]);
+        }
+        app.graph?.setDirtyCanvas(true, true);
+    };
+    const orig = sw.callback;
+    sw.callback = function () {
+        const r = orig?.apply(this, arguments);
+        apply(true);
+        return r;
+    };
+    node._cocoApplyStory = () => apply(false);
     apply(true);
 }
 
@@ -638,7 +665,7 @@ app.registerExtension({
             );
             dontSerialize(detectBtn);
 
-            // coco2's LLM switch: the dot follows it straight away.
+            // The LLM switch: the dot follows it straight away.
             const sw = getWidget(node, "enabled");
             if (sw) {
                 const orig = sw.callback;
@@ -683,16 +710,19 @@ app.registerExtension({
             dontSerialize(presetBtn);
             foldAdvanced(node);
 
-            dontSerialize(node.addWidget("button", "🆕 New story (empty the sheet)",
-                null, () => setStorySheet(node, "")));
-            dontSerialize(node.addWidget("button", "↩ Undo the last sheet change",
-                null, () => {
-                    if (node._prevSheet === undefined) {
-                        toast("info", "Story sheet", "Nothing to undo yet.");
-                        return;
-                    }
-                    setStorySheet(node, node._prevSheet);
-                }));
+            const storyBtns = [
+                dontSerialize(node.addWidget("button", "🆕 New story (empty the sheet)",
+                    null, () => setStorySheet(node, ""))),
+                dontSerialize(node.addWidget("button", "↩ Undo the last sheet change",
+                    null, () => {
+                        if (node._prevSheet === undefined) {
+                            toast("info", "Story sheet", "Nothing to undo yet.");
+                            return;
+                        }
+                        setStorySheet(node, node._prevSheet);
+                    })),
+            ];
+            foldStory(node, storyBtns);
 
             // Auto-load the matching preset into the system prompt box on change.
             const tw = getWidget(node, "target_model");
@@ -721,8 +751,10 @@ app.registerExtension({
                 // restored before the empty sockets around them are trimmed.
                 syncPictureSlots(node);
                 refreshStatus(node);
-                // A saved workflow may reopen with them shown.
+                // A saved workflow may reopen with them shown, and with story
+                // mode in another state than the default.
                 node._cocoApplyFold?.();
+                node._cocoApplyStory?.();
             }, 250);
 
             return ret;

@@ -111,6 +111,8 @@ wire into the music model's two separate inputs), plus a generic preset.
   story gets. The sheet sits in the `story_sheet` box: it is saved with the
   workflow, you can **edit it by hand**, **🆕 New story** empties it and
   **↩ Undo** takes back the last change. It also comes out of the third output.
+  While `story_mode` is off, the box and its two buttons are hidden (not
+  emptied: the sheet keeps its text).
   Made for text-to-image cards (pair it with a LoRA for the face). While it is
   on, `keep_history` is not used. The sheet and the prompt are both written out
   of `max_tokens`: raise it if the node reports a sheet with no prompt.
@@ -169,7 +171,7 @@ wire into the music model's two separate inputs), plus a generic preset.
   characters, never renumbering or inventing one. Made for the *ref* and *edit*
   cards; a format with no reference labels only uses it to keep names, looks and
   voices consistent. Left unconnected, the node sends exactly what it sent
-  before.
+  before. Suggested by @skaf777 in #12.
 - **Video input** (`video` socket + the `video_*` widgets): connect the `IMAGE`
   batch a video loader outputs and the node **samples frames out of it** and
   shows them to the vision model, labelled `<Video 1> frame 3 of 8`. That is the
@@ -258,6 +260,20 @@ wire into the music model's two separate inputs), plus a generic preset.
   `⚠ LLM OFFLINE`, and `raw_response` says why. A fixed seed does not keep the
   stand-in cached: the node runs again on the next queue. A server that is up
   but too slow (`timeout`) is still an error, not an offline server.
+- **LLM on/off switch** (`enabled`, last on the node): **off**, the LLM is
+  never called and your `user_prompt` goes out unchanged as `prompt` and
+  `raw_response`; the dot turns grey and the preview starts with `⏻ LLM OFF`.
+  Unlike Ctrl+B (a bypassed node hands on another input, never `user_prompt`),
+  it outputs your text, and it can be set from an API prompt. It is optional
+  and on by default, so API prompts and workflows saved before it run as they
+  did. Suggested by @PhillLittlewood in #11.
+- **Advanced settings folded**: the settings one rarely touches (sampling
+  extras, history, timeout, picture/audio/video tuning, memory, `api_key`,
+  `on_llm_offline`...) are hidden behind **⚙ Show the advanced settings** at
+  the bottom of the node (Nodes 2.0 and the side panel use their own "advanced"
+  toggle). Hidden only: they keep their values, are saved with the workflow and
+  are still sent. Whether they are shown is saved with the workflow. Suggested
+  by @PhillLittlewood in #11.
 
 Outputs:
 - `prompt` – the cleaned text (after the cut tag, **no thinking**). It is a
