@@ -160,6 +160,16 @@ wire into the music model's two separate inputs), plus a generic preset.
   graph. Leave the role on `none` but connect the socket and the LLM is told to
   infer the role from your request. With neither, not a word about audio is
   added — the nine non-video cards stay clean.
+- **Reference map** (`reference_map` socket, optional): for MiniMax H3 with
+  RefMod-style character references, which reach the video model without the
+  LLM ever seeing them. Wire in the list of what is loaded and under which
+  label — the `reference_map` a RefMod node outputs, or your own text such as
+  `<Subject 1> = Ann, long brown hair, low voice; <Audio 1> = Ann's voice` —
+  and the LLM is told to cite exactly those labels for exactly those
+  characters, never renumbering or inventing one. Made for the *ref* and *edit*
+  cards; a format with no reference labels only uses it to keep names, looks and
+  voices consistent. Left unconnected, the node sends exactly what it sent
+  before.
 - **Video input** (`video` socket + the `video_*` widgets): connect the `IMAGE`
   batch a video loader outputs and the node **samples frames out of it** and
   shows them to the vision model, labelled `<Video 1> frame 3 of 8`. That is the

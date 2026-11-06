@@ -1276,6 +1276,39 @@ def _picture_manifest(count: int) -> str:
             % (head, rule, count + 1, same))
 
 
+def _reference_map_block(text: str) -> str:
+    """The reference map, wrapped in the rules for using it; "" when empty.
+
+    RefMod node packs give the VIDEO model its references - characters with
+    their looks and voices - after the text is encoded, so the LLM never sees
+    them. The map is the list those packs (or the user) write of what is loaded
+    and under which label. Its whole value is that the prompt cites the same
+    labels for the same things, so the rules are about not renumbering.
+    """
+    text = (text or "").strip()
+    if not text:
+        return ""
+    return ("[REFERENCE MAP - the references actually loaded in the video model]\n"
+            "The text below comes from the workflow and lists the references the "
+            "video model really receives, with the label each one carries there. "
+            "You were not shown them: this text is all you know about them.\n"
+            "- These labels exist and you may cite them even where the [IMAGE "
+            "INPUTS], [AUDIO INPUT] or [VIDEO INPUT] lines say nothing was "
+            "connected: those lines declare what YOU were shown, this map declares "
+            "what the video model holds.\n"
+            "- Use every label exactly as written, with exactly the meaning the map "
+            "gives it: never renumber one, never swap two, never give a label to "
+            "another character, and never invent a label of the same kind that the "
+            "map does not list.\n"
+            "- When the user names a character, use the label the map binds to that "
+            "name, and describe that character as the map does - looks, outfit, "
+            "voice - never contradicting it.\n"
+            "- If the format you are writing has no place for reference labels, "
+            "write none, and use the map only to keep each character's name, look "
+            "and voice consistent.\n"
+            "[MAP]\n" + text)
+
+
 def _audio_manifest(connected: bool, role: str) -> str:
     """State that an audio reference exists and what it is for.
 
@@ -1491,6 +1524,15 @@ class LLMPromptStudio:
                        "is FOR is set by audio_role. The node does not listen to "
                        "it - it declares it, so the prompt can carry the reuse or "
                        "reference relationship H3 expects."})
+        optional["reference_map"] = ("STRING", {"forceInput": True,
+            "tooltip": "Optional. Which references the video model really holds "
+                       "and under which label - e.g. the reference_map a RefMod "
+                       "node outputs, or your own text: '<Subject 1> = Ann, long "
+                       "brown hair, low voice; <Audio 1> = Ann's voice'. The LLM is "
+                       "told to cite exactly these labels for exactly these "
+                       "characters, never renumbering them. Left unconnected, "
+                       "nothing changes. Meant for the MiniMax H3 ref and edit "
+                       "cards, whose format cites references."})
         optional["video"] = ("IMAGE", {
             "tooltip": "Optional source video, as the IMAGE batch a video loader "
                        "outputs. Frames are sampled from it and shown to the vision "
@@ -1620,7 +1662,7 @@ class LLMPromptStudio:
         # keep their order, and widgets_values with it. Saved workflows are
         # realigned by name when they are opened (web/, realignWorkflow).
         names = list(optional)
-        for key in ("audio", "video"):
+        for key in ("reference_map", "audio", "video"):
             names.remove(key)
             names.insert(names.index("image"), key)
         optional = {k: optional[k] for k in names}
@@ -1651,7 +1693,7 @@ class LLMPromptStudio:
                  enable_repeat_penalty=True, unload_after=False,
                  context_length=0, context_slots=0,
                  on_llm_offline=OFFLINE_MODES[0], story_mode=False,
-                 story_sheet="", **pictures):
+                 story_sheet="", reference_map="", **pictures):
 
         # 0) the same story request on the same seed, with the sheet the last
         #    run wrote: that run's answer, without asking again (_STORY_MEMO).
@@ -1665,7 +1707,8 @@ class LLMPromptStudio:
             memo_sig = json.dumps(
                 [base_url, model, target_model, global_directives, system_prompt,
                  user_prompt, temperature, top_p, top_k, min_p, repeat_penalty,
-                 max_tokens, seed, thinking, strip_before_tag, no_think_model],
+                 max_tokens, seed, thinking, strip_before_tag, no_think_model,
+                 reference_map],
                 default=str)
             hit = _STORY_MEMO.get(memo_key)
             if hit and hit[0] == memo_sig and hit[1] == sheet_in:
@@ -1708,6 +1751,11 @@ class LLMPromptStudio:
             sys_prompt += "\n\n" + video_note
             print("[LLMPromptStudio] video declared as <Video 1>: %s (%d frames sent)"
                   % (video_role, len(frames)))
+        ref_note = _reference_map_block(reference_map)
+        if ref_note:
+            sys_prompt += "\n\n" + ref_note
+            print("[LLMPromptStudio] reference map declared (%d line(s))"
+                  % len([l for l in reference_map.splitlines() if l.strip()]))
         gd = (global_directives or "").strip()
         if gd:
             sys_prompt = (
