@@ -298,6 +298,11 @@ wire into the music model's two separate inputs), plus a generic preset.
   toggle). Hidden only: they keep their values, are saved with the workflow and
   are still sent. Whether they are shown is saved with the workflow. Suggested
   by @PhillLittlewood in #11.
+- **Colour groups**: each setting is tinted by what it is about - blue the LLM
+  server, violet what to write, orange how the LLM writes, green memory and
+  story, teal pictures / audio / video, pink sequence mode - and the LLM switch
+  is red. Colour only: the order of the settings never changes, so saved
+  workflows keep their values. Classic canvas only (Nodes 2.0 draws its own).
 
 Outputs:
 - `prompt` – the cleaned text (after the cut tag, **no thinking**). It is a

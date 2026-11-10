@@ -611,6 +611,7 @@ function buildSequence(node) {
     const btn = dontSerialize(node.addWidget("button", sequenceLabel(node), null,
         () => setSequenceSheet(node, "")));
     node._cocoSeqBtn = btn;
+    btn._cocoGroup = "sequence";
     const apply = (resize) => {
         const on = inSequence(node);
         // rewrite_videos only means something in sequence mode.
@@ -632,6 +633,81 @@ function buildSequence(node) {
         apply(resize);
     };
     apply(false);
+}
+
+// ------------------------------------------------------------- colour groups
+// Each setting is tinted by what it is about, so the node reads at a glance;
+// the LLM switch is red. Colour only: the order of the widgets is what saved
+// workflows go by, so it is never changed. Classic canvas only (Nodes 2.0
+// draws its own widgets).
+const GROUPS = {
+    server: [59, 130, 246],      // the LLM server and how it is used
+    writing: [168, 85, 247],     // what to write, and for which model
+    sampling: [245, 158, 11],    // how the LLM writes
+    memory: [34, 197, 94],       // chat history and story mode
+    media: [20, 184, 166],       // how pictures, audio and video are read
+    sequence: [236, 72, 153],    // sequence mode
+    switch: [220, 38, 38],       // the LLM on/off switch
+};
+const GROUP_OF = {};
+for (const [group, names] of Object.entries({
+    server: ["base_url", "api_key", "model", "timeout", "no_think_model",
+        "unload_after", "context_length", "context_slots", "on_llm_offline"],
+    writing: ["target_model", "global_directives", "system_prompt",
+        "user_prompt", "reference_map"],
+    sampling: ["temperature", "top_p", "top_k", "min_p", "enable_min_p",
+        "repeat_penalty", "enable_repeat_penalty", "max_tokens", "seed",
+        "control_after_generate", "thinking", "strip_before_tag"],
+    memory: ["keep_history", "max_history_turns", "reset_history",
+        "story_mode", "story_sheet"],
+    media: ["image_analysis_size", "audio_role", "video_stride",
+        "video_max_frames", "video_frame_size", "video_fps", "video_role"],
+    sequence: ["sequence_sheet", "rewrite_videos"],
+    switch: ["enabled"],
+})) for (const n of names) GROUP_OF[n] = group;
+
+function parseColor(c) {
+    const m = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(String(c || "").trim());
+    if (!m) return null;
+    const h = m[1].length === 3 ? m[1].replace(/./g, "$&$&") : m[1];
+    return [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16));
+}
+
+// The widget's own background, pulled toward the group colour: it follows
+// the theme (light or dark) instead of replacing it.
+function tint(rgb, amount) {
+    const base = parseColor(globalThis.LiteGraph?.WIDGET_BGCOLOR) || [34, 34, 34];
+    const mix = base.map((b, i) => Math.round(b + (rgb[i] - b) * amount));
+    return `rgb(${mix.join(",")})`;
+}
+
+function tintWidget(w) {
+    const group = w._cocoGroup || GROUP_OF[w.name];
+    if (!group || w._cocoTinted === group) return;
+    w._cocoTinted = group;
+    const rgb = GROUPS[group];
+    const strong = group === "switch";
+    const el = w.element || w.inputEl;
+    if (el?.style) {
+        // A multiline box is an HTML element over the canvas.
+        el.style.backgroundColor =
+            `color-mix(in srgb, rgb(${rgb.join(",")}) 14%, var(--comfy-input-bg, #222))`;
+        el.style.borderLeft = `3px solid rgb(${rgb.join(",")})`;
+        return;
+    }
+    try {
+        Object.defineProperty(w, "background_color", {
+            configurable: true,
+            get: () => tint(rgb, strong ? 0.6 : 0.2),
+        });
+        const outline = `rgba(${rgb.join(",")}, ${strong ? 1 : 0.7})`;
+        w.getOutlineColor = () => outline;
+    } catch (e) { /* a widget of another kind: left as it is */ }
+}
+
+function tintWidgets(node) {
+    if (globalThis.LiteGraph?.vueNodesMode) return;
+    for (const w of node.widgets || []) tintWidget(w);
 }
 
 // ------------------------------------------------------ reopening a workflow
@@ -797,6 +873,7 @@ app.registerExtension({
                 () => detectModel(node)
             );
             dontSerialize(detectBtn);
+            detectBtn._cocoGroup = "server";
 
             // The LLM switch: the dot follows it straight away.
             const sw = getWidget(node, "enabled");
@@ -841,6 +918,7 @@ app.registerExtension({
                 applyTemplate
             );
             dontSerialize(presetBtn);
+            presetBtn._cocoGroup = "writing";
             foldAdvanced(node);
 
             const storyBtns = [
@@ -855,6 +933,7 @@ app.registerExtension({
                         setStorySheet(node, node._prevSheet);
                     })),
             ];
+            for (const b of storyBtns) b._cocoGroup = "memory";
             foldStory(node, storyBtns);
             buildSequence(node);
 
@@ -938,6 +1017,9 @@ app.registerExtension({
         nodeType.prototype.onDrawForeground = function (ctx) {
             const r = onDrawForeground?.apply(this, arguments);
             if (this.flags?.collapsed) return r;
+            // Runs before the widgets are drawn: a widget added or swapped
+            // since (the model list, the preview box) is tinted in time.
+            tintWidgets(this);
             const seqBtn = this._cocoSeqBtn;
             if (seqBtn && !seqBtn.hidden) {
                 const label = sequenceLabel(this);
