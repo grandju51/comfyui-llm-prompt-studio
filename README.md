@@ -116,6 +116,25 @@ wire into the music model's two separate inputs), plus a generic preset.
   Made for text-to-image cards (pair it with a LoRA for the face). While it is
   on, `keep_history` is not used. The sheet and the prompt are both written out
   of `max_tokens`: raise it if the node reports a sheet with no prompt.
+- **Sequence mode** (`prompt`, `prompt_2`, `prompt_3`...): one long video made
+  of several clips, **one prompt per clip**. `prompt` is video 1; wire
+  `prompt_2` and a `prompt_3` socket appears, up to 16. The number of videos is
+  the number of outputs wired to an **active** node: a video whose nodes are
+  bypassed (Ctrl+B) or muted (Ctrl+M) is not counted, even when wired.
+  Write the whole story in `user_prompt` ("video 1 ... video 2 ..."). The LLM
+  first writes a **bible** (each character, place, object, sound and style)
+  and a **plan** (what happens in each video), then each prompt on its own, in
+  order, from the bible, the plan and the prompt before it, so the clips stay
+  consistent. All of it is kept in the **sequence sheet** on the node: saved
+  with the workflow, editable by hand, emptied by **🆕 New sequence**.
+  To **redo one video**, bypass the others and queue with a new seed: only
+  that prompt is rewritten (from the prompts around it), the others are kept
+  word for word, and `prompt_3` always stays video 3.
+  With the LLM switched off, the text is cut on "video 1 / video 2...": what
+  comes before video 1 and a sentence about every video ("9 seconds per
+  video") go into each one. Each prompt is written out of `max_tokens`: a clip
+  with several shots needs more than a single image prompt. With only `prompt`
+  wired, the node works as before.
 - **Conversation memory**: `keep_history` for multi-turn chat,
   `max_history_turns` to set how many past turns are remembered (context depth),
   and `reset_history` to clear it.
@@ -282,6 +301,7 @@ Outputs:
 - `raw_response` – the full untouched answer (for debugging the thinking).
 - `story_sheet` – the story sheet as it stands after the run (empty when
   `story_mode` is off).
+- `prompt_2` ... `prompt_16` – the prompts of videos 2 to 16 (sequence mode).
 - **On-node preview**: after each run the node also shows the generated prompt
   (cleaned, no thinking) right on itself, so you can read it without wiring a
   preview node.

@@ -36,6 +36,7 @@ import io
 import json
 import os
 import re
+import sys
 import time
 import traceback
 import urllib.error
@@ -823,15 +824,19 @@ def _post_chat(url: str, payload: dict, api_key: str, timeout: int):
                           % (first, dropped, e2.code, _body(e2)))
 
 
-def _ui_result(prompt_text: str, raw_text: str, sheet: str = ""):
+def _ui_result(prompt_text: str, raw_text: str, sheet: str = "", error=False):
     """Return both the on-node text preview and the STRING outputs.
 
     ``sheet`` is the story sheet as it stands - the one that came in, on every
     path that did not write a new one, so the third output never goes blank on
-    an error.
+    an error. ``error`` marks an error text standing in for the prompt, which
+    is how sequence mode tells the two apart.
     """
-    return {"ui": {"text": [prompt_text]},
-            "result": (prompt_text, raw_text, sheet)}
+    out = {"ui": {"text": [prompt_text]},
+           "result": (prompt_text, raw_text, sheet)}
+    if error:
+        out["ui"]["llm_error"] = [True]
+    return out
 
 
 # ------------------------------------------------------------------ story mode
@@ -1047,6 +1052,370 @@ def _offline_result(mode: str, key: str, unique_id, user_prompt: str,
     return {"ui": {"text": ["⚠ LLM OFFLINE - %s\n\n%s" % (note, prompt)],
                    "llm_offline": [msg]},
             "result": (prompt, msg, sheet)}
+
+
+# ---------------------------------------------------------------- sequence mode
+# A long video made of several clips, one prompt per clip. The node has one
+# prompt output per video (prompt = video 1, then prompt_2, prompt_3...), and
+# how many videos there are is read off the graph: an output counts when it
+# feeds a node that really runs. A node switched off with Ctrl+B or Ctrl+M is
+# not in what ComfyUI runs, so a video bypassed that way does not count - and
+# that is also how ONE video is redone: bypass the others, queue, and only the
+# active ones are written again, the others keep their prompt.
+#
+# Two steps. First a PLAN: a bible (characters, places, objects, sound, style)
+# and one line per video. Then one call per active video, which gets the bible,
+# the plan and the prompts on either side of it. Small local models write one
+# good prompt far better than six at once.
+#
+# Everything is kept in the SEQUENCE SHEET: bible, plan and every prompt. It is
+# saved in the workflow (node.properties, written by the front-end) and read
+# back from the workflow ComfyUI hands the node (EXTRA_PNGINFO). It is NOT a
+# widget on purpose: a widget is an input, and an input that changes after
+# every run would make ComfyUI render every video again on the next queue.
+MAX_VIDEOS = 16
+
+
+def _video_of_slot(slot) -> int:
+    """Output slot -> video number (0: not a prompt output)."""
+    if slot == 0:
+        return 1
+    if isinstance(slot, int) and 3 <= slot < 3 + MAX_VIDEOS - 1:
+        return slot - 1
+    return 0
+
+
+def _is_output_class(class_type, classes) -> bool:
+    cls = classes.get(class_type)
+    if cls is None:
+        return True     # unknown: rather count the video than drop it
+    try:
+        return bool(getattr(cls, "OUTPUT_NODE", False))
+    except Exception:
+        return True
+
+
+def _active_videos(graph, unique_id) -> set:
+    """The videos whose prompt output feeds, at any depth, a node that saves or
+    shows something - i.e. a branch ComfyUI will really run."""
+    if not isinstance(graph, dict) or unique_id is None:
+        return set()
+    uid = str(unique_id)
+    consumers, direct = {}, {}
+    for nid, node in graph.items():
+        if not isinstance(node, dict):
+            continue
+        for v in (node.get("inputs") or {}).values():
+            if (isinstance(v, (list, tuple)) and len(v) == 2
+                    and isinstance(v[1], int) and not isinstance(v[1], bool)):
+                src = str(v[0])
+                consumers.setdefault(src, set()).add(str(nid))
+                if src == uid:
+                    direct.setdefault(v[1], set()).add(str(nid))
+    if not direct:
+        return set()
+    classes = getattr(sys.modules.get("nodes"), "NODE_CLASS_MAPPINGS", None) or {}
+
+    def reaches_output(start):
+        stack, seen = [start], set()
+        while stack:
+            n = stack.pop()
+            if n in seen:
+                continue
+            seen.add(n)
+            node = graph.get(n) or {}
+            if _is_output_class(node.get("class_type"), classes):
+                return True
+            stack.extend(consumers.get(n, ()))
+        return False
+
+    active = set()
+    for slot, targets in direct.items():
+        k = _video_of_slot(slot)
+        if k and any(reaches_output(t) for t in targets):
+            active.add(k)
+    return active
+
+
+_SEQ_SECTION = re.compile(r"^[ \t*#>]*\[\s*(BIBLE|PLAN|VIDEO\s*(\d+))\s*\][ \t*]*$",
+                          re.I | re.M)
+_SEQ_CLOSE = re.compile(r"^[ \t*]*\[\s*/[^\]\n]*\][ \t*]*$", re.M)
+_SEQ_PLAN_LINE = re.compile(
+    r"^[ \t*#>\-]*VIDEO\s*(\d+)\s*\**\s*[:.\-–—]\s*\**\s*(.*)$", re.I)
+
+
+def _parse_plan(body: str) -> dict:
+    plan, cur = {}, None
+    for line in body.splitlines():
+        m = _SEQ_PLAN_LINE.match(line)
+        if m:
+            cur = int(m.group(1))
+            plan[cur] = m.group(2).strip().rstrip("*").strip()
+        elif cur is not None and line.strip():
+            plan[cur] = (plan[cur] + " " + line.strip()).strip()
+    return plan
+
+
+def _parse_sequence(text: str):
+    """(bible, {video: plan line}, {video: prompt}) out of a sheet or a plan."""
+    text = _SEQ_CLOSE.sub("", text or "")
+    bible, plan, prompts = "", {}, {}
+    marks = list(_SEQ_SECTION.finditer(text))
+    for i, m in enumerate(marks):
+        end = marks[i + 1].start() if i + 1 < len(marks) else len(text)
+        body = text[m.end():end].strip()
+        tag = m.group(1).upper()
+        if tag == "BIBLE":
+            bible = body
+        elif tag == "PLAN":
+            plan = _parse_plan(body)
+        elif body:
+            prompts[int(m.group(2))] = body
+    return bible, plan, prompts
+
+
+def _plan_text(plan: dict) -> str:
+    return "\n".join("VIDEO %d: %s" % (k, plan[k]) for k in sorted(plan))
+
+
+def _build_sequence(bible: str, plan: dict, prompts: dict) -> str:
+    parts = ["[BIBLE]", bible.strip(), "", "[PLAN]", _plan_text(plan)]
+    for k in sorted(prompts):
+        parts += ["", "[VIDEO %d]" % k, prompts[k].strip()]
+    return "\n".join(parts).strip() + "\n"
+
+
+_SEQ_INLINE_TAG = re.compile(r"\[\s*/?\s*(?:VIDEO\s*\d+|PROMPT|PLAN|BIBLE)\s*\]", re.I)
+
+
+def _clean_video_prompt(text: str, k: int) -> str:
+    t = _SEQ_INLINE_TAG.sub("", text or "").strip()
+    return re.sub(r"(?i)^\W*video\s*%d\s*[:.\-–—]\s*" % k, "", t).strip()
+
+
+# "dans la vidéo 2 ...", "video 3:", "clip 4 -": where the user's own text
+# puts each video, for the paths that send it on without an LLM.
+_VIDEO_MARK = re.compile(r"(?i)\b(?:vid[ée]o|clip)\s*(?:n[°o]\s*)?(\d+)\b\s*[:,.\-–—]?")
+_TRAILING_GLUE = re.compile(
+    r"(?i)[\s,;]*(?:\b(?:dans|in|la|le|the|et|and|puis|then|de|du|pour|for)\b[\s,;]*)+$")
+
+
+# A sentence about every video ("9 secondes par vidéo") is not part of the
+# video it happens to follow.
+_EVERY_VIDEO = re.compile(
+    r"(?i)\b(?:par|chaque|toutes?\s+les|pour\s+les|per|each|every|all(?:\s+the)?)"
+    r"\s+(?:vid[ée]os?|clips?)\b")
+_SENTENCE = re.compile(r"[^.!?\n]+(?:[.!?]+|$)")
+
+
+def _split_by_video(text: str) -> dict:
+    """{video: the user's words for it}. What comes before "video 1" and the
+    sentences about every video are shared: they go into each one."""
+    text = text or ""
+    marks = list(_VIDEO_MARK.finditer(text))
+    if not marks:
+        return {}
+    shared = [text[:marks[0].start()].strip(" \t\n,;")]
+    out = {}
+    for i, m in enumerate(marks):
+        end = marks[i + 1].start() if i + 1 < len(marks) else len(text)
+        seg = text[m.end():end]
+        if i == len(marks) - 1:
+            own = []
+            for s in _SENTENCE.findall(seg):
+                (shared if _EVERY_VIDEO.search(s) else own).append(s.strip())
+            seg = " ".join(x for x in own if x)
+        seg = _TRAILING_GLUE.sub("", seg).strip(" \t\n,;")
+        if seg:
+            k = int(m.group(1))
+            out[k] = (out.get(k, "") + " " + seg).strip()
+    head = " ".join(x for x in shared if x)
+    if head:
+        out = {k: head + "\n" + v for k, v in out.items()}
+    return out
+
+
+_SEQ_PLAN_RULES = """\
+[SEQUENCE PLANNING - this overrides any earlier rule about what to output]
+The user describes ONE story told by a sequence of exactly @N videos for \
+@TARGET. Each video is generated on its own, by a model that never sees the \
+others, then they are played one after another. You do NOT write the video \
+prompts now. You write the BIBLE that keeps every video consistent, and the \
+PLAN of what happens in each video.
+
+Numbering: when the request numbers the videos ("video 1", "dans la vidéo 2", \
+"clip 3"), follow that numbering exactly - what it puts in video 2 goes in \
+VIDEO 2, nowhere else. When it does not, split the story over the @N videos in \
+order, giving each a fair share of the action.
+
+The BIBLE has this shape:
+CHARACTER 1 - <name or short label>
+  identity: <what never changes: face, hair cut and colour, eyes, skin, body, age>
+  wearing: <every garment and accessory, each with its colour and material>
+  voice: <how they sound if they speak, else "none">
+(one block per character, the ones the request only implies included)
+PLACES: <each place: its look, time of day, light>
+OBJECTS: <things that matter and come back - a watch, a car - with their look>
+SOUND: <music, ambience, recurring sounds>
+STYLE: <medium, rendering, colour grade, mood - shared by every video>
+Where the request says nothing, choose concrete details: every video will \
+repeat them, so they must exist.
+
+The PLAN has one line per video, VIDEO 1 to VIDEO @N:
+VIDEO <number>: <who, where, what happens, in order; each change of shot \
+inside the video written as "then cut to ..."; how it starts and how it ends; \
+and whether it CONTINUES the previous video (same place, same moment) or CUTS \
+to another place or time>
+If the request gives a length per video, plan no more action than fits in it.
+
+Attached pictures show characters, places or a style, as the request says to \
+use them: read identity, clothes and look from them into the BIBLE.
+
+Answer in EXACTLY this layout, in English, with nothing before or after:
+[BIBLE]
+<the bible>
+[PLAN]
+VIDEO 1: <...>
+...
+VIDEO @N: <...>"""
+
+_SEQ_PLAN_UPDATE = """\
+The current BIBLE and PLAN follow. The request is the whole story again, \
+possibly edited: copy every line it does not change WORD FOR WORD, change only \
+what it changes, and keep the line of a video it says nothing new about.
+[CURRENT BIBLE]
+@BIBLE
+[CURRENT PLAN]
+@PLAN"""
+
+_SEQ_WRITE_RULES = """\
+[SEQUENCE MODE - this overrides any earlier rule about what the user message is]
+You write the prompt for VIDEO @K of a sequence of @N videos that tell one \
+story. Each video is generated on its own by a model that never sees the \
+others; they are then played one after another. The user message says what \
+happens in VIDEO @K. The bible and the plan below are the truth for the whole \
+sequence.
+
+[BIBLE]
+@BIBLE
+
+[PLAN]
+@PLAN
+@NEIGHBOURS
+[THE USER'S REQUEST FOR THE WHOLE SEQUENCE - for reference only]
+@REQUEST
+
+Rules:
+- Write ONLY the prompt for VIDEO @K, in the format the instructions above ask \
+for. Nothing before or after it, no title, no "VIDEO @K".
+- Keep to what the plan gives VIDEO @K: never borrow an action from another \
+video, never tell what happens next.
+- The prompt stands alone: describe every character on screen in full from \
+the bible (identity and what they wear), the place, the objects that are seen \
+and the style - every time, even when the previous video already showed them. \
+Never write "same as before", "again", "still", "continues", and never mention \
+other videos, the sequence, the plan or the bible.
+- The bible's labels are for you only: never write "Place A", "Character 2", \
+"The Mother" or "Video 1" in the prompt - describe the place and the person \
+instead. A name the user gave a character may be used.
+- Continuity: when VIDEO @K CONTINUES the previous video, it starts exactly \
+where that one ends - same positions, light, clothes, damage, objects. When \
+the plan says it CUTS to another place or time, start fresh there. When the \
+NEXT VIDEO is given above, end where it begins.
+- A change of shot inside VIDEO @K ("then cut to", "changement de plan") is a \
+shot of this one prompt, written with the shot structure the format has (for \
+example [Shot 1], [Shot 2]); never a separate prompt."""
+
+
+def _fill(template: str, **values) -> str:
+    for k, v in values.items():
+        template = template.replace("@" + k, str(v))
+    return template
+
+
+def _plan_block(n, target, bible, plan) -> str:
+    block = _fill(_SEQ_PLAN_RULES, N=n, TARGET=target)
+    if bible or plan:
+        block += "\n\n" + _fill(_SEQ_PLAN_UPDATE, BIBLE=bible or "(empty)",
+                                PLAN=_plan_text(plan) or "(empty)")
+    return block
+
+
+def _write_block(k, n, bible, plan, prev, nxt, request) -> str:
+    near = ""
+    if prev:
+        near += "\n[PREVIOUS VIDEO - VIDEO %d, final]\n%s\n" % (k - 1, prev.strip())
+    if nxt:
+        near += "\n[NEXT VIDEO - VIDEO %d, final]\n%s\n" % (k + 1, nxt.strip())
+    return _fill(_SEQ_WRITE_RULES, K=k, N=n, BIBLE=bible or "(empty)",
+                 PLAN=_plan_text(plan) or "(empty)", NEIGHBOURS=near,
+                 REQUEST=(request or "").strip())
+
+
+# The sheet as the server last wrote it, per node: what an API prompt (no
+# workflow attached) reads, kept on disk for a restart.
+_SEQ_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "sequences.json")
+_SEQ_SHEETS = None
+# { node id: signature of the request the current plan was made from }
+_SEQ_PLANNED = {}
+
+
+def _seq_sheets() -> dict:
+    global _SEQ_SHEETS
+    if _SEQ_SHEETS is None:
+        try:
+            with open(_SEQ_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            _SEQ_SHEETS = data if isinstance(data, dict) else {}
+        except Exception:
+            _SEQ_SHEETS = {}
+    return _SEQ_SHEETS
+
+
+def _remember_sheet(unique_id, sheet: str):
+    store = _seq_sheets()
+    store[str(unique_id)] = sheet
+    tmp = _SEQ_FILE + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(store, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, _SEQ_FILE)
+    except Exception as e:
+        print("[LLMPromptStudio] could not save the sequence sheet:", e)
+
+
+def _workflow_sheet(extra_pnginfo, unique_id):
+    """The sheet saved on this node in the workflow, or None when there is no
+    workflow (API prompt) or the node never received one."""
+    try:
+        wf = (extra_pnginfo or {}).get("workflow")
+        if not isinstance(wf, dict):
+            return None
+        uid = str(unique_id)
+        last = uid.split(":")[-1]
+        if ":" in uid:
+            pools = [sg.get("nodes") or [] for sg in
+                     ((wf.get("definitions") or {}).get("subgraphs") or [])]
+        else:
+            pools = [wf.get("nodes") or []]
+        for pool in pools:
+            for n in pool:
+                if str(n.get("id")) == last and n.get("type") == "LLMPromptStudio":
+                    props = n.get("properties") or {}
+                    if "cocoSequence" in props:
+                        return str(props.get("cocoSequence") or "")
+        return None
+    except Exception:
+        return None
+
+
+def _sequence_preview(head: str, total: int, prompts: dict, active) -> str:
+    blocks = []
+    for k in range(1, total + 1):
+        tag = "" if k in active else " (kept)"
+        blocks.append("[VIDEO %d]%s\n%s" % (k, tag, prompts.get(k) or "(no prompt yet)"))
+    return head + "\n\n" + "\n\n".join(blocks)
 
 
 def _target_size(width: int, height: int, size_mode: str):
@@ -1365,8 +1734,19 @@ class LLMPromptStudio:
 
     CATEGORY = "LLM Prompt Studio"
     FUNCTION = "generate"
-    RETURN_TYPES = ("STRING", "STRING", "STRING")
-    RETURN_NAMES = ("prompt", "raw_response", "story_sheet")
+    # prompt_2.. come after the three historical outputs, so no saved wire moves.
+    # `prompt` is video 1 of a sequence; the front-end shows prompt_N one at a
+    # time, as they get wired.
+    RETURN_TYPES = ("STRING",) * (3 + MAX_VIDEOS - 1)
+    RETURN_NAMES = ("prompt", "raw_response", "story_sheet") + tuple(
+        "prompt_%d" % k for k in range(2, MAX_VIDEOS + 1))
+    OUTPUT_TOOLTIPS = (
+        "The prompt. In a sequence, the prompt of video 1.",
+        "The full answer of the LLM, thinking included (for debugging).",
+        "The story sheet after the run (story mode).") + tuple(
+        "Sequence: the prompt of video %d. Wiring prompt_2 or above to a node "
+        "that runs turns sequence mode on: one prompt per wired video, all "
+        "consistent with each other." % k for k in range(2, MAX_VIDEOS + 1))
 
     @classmethod
     def _base_spec(cls):
@@ -1509,7 +1889,10 @@ class LLMPromptStudio:
                                                "so on: there is no fixed number of "
                                                "reference images."}),
             },
-            "hidden": {"unique_id": "UNIQUE_ID"},
+            # prompt + extra_pnginfo: which outputs feed a node that really
+            # runs (sequence mode), and the sequence sheet saved in the workflow.
+            "hidden": {"unique_id": "UNIQUE_ID", "prompt": "PROMPT",
+                       "extra_pnginfo": "EXTRA_PNGINFO"},
         }
 
         # Extra picture sockets, added after the literal so the block above keeps
@@ -1705,7 +2088,17 @@ class LLMPromptStudio:
         return seed
 
     # ------------------------------------------------------------------ main
-    def generate(self, base_url, model, target_model, global_directives,
+    def generate(self, prompt=None, extra_pnginfo=None, **kw):
+        # Sequence mode is on when a prompt_N (N >= 2) feeds a node that runs.
+        # Otherwise nothing changes: one prompt, the extra outputs empty.
+        active = _active_videos(prompt, kw.get("unique_id"))
+        if any(k >= 2 for k in active):
+            return self._generate_sequence(active, extra_pnginfo, kw)
+        out = self._generate_single(**kw)
+        res = tuple(out["result"])
+        return {**out, "result": res + ("",) * (len(self.RETURN_TYPES) - len(res))}
+
+    def _generate_single(self, base_url, model, target_model, global_directives,
                  system_prompt, user_prompt, temperature, top_p, top_k, min_p,
                  repeat_penalty, max_tokens, seed, thinking, strip_before_tag,
                  keep_history, max_history_turns, reset_history, timeout,
@@ -1718,7 +2111,8 @@ class LLMPromptStudio:
                  enable_repeat_penalty=True, unload_after=False,
                  context_length=0, context_slots=0,
                  on_llm_offline=OFFLINE_MODES[0], story_mode=False,
-                 story_sheet="", reference_map="", enabled=True, **pictures):
+                 story_sheet="", reference_map="", enabled=True, _tail="",
+                 **pictures):
 
         # 00) LLM switched off (`enabled`): no request at all, the idea
         #    goes through as the prompt. Ctrl+B does not do this - a bypassed
@@ -1807,6 +2201,9 @@ class LLMPromptStudio:
         #    layout they ask for is the final word on what to output.
         if story_mode:
             sys_prompt += "\n\n" + _story_block(sheet_in)
+        # Sequence mode's own rules, last for the same reason.
+        if _tail:
+            sys_prompt += "\n\n" + _tail
 
         # 3) thinking control. The model is resolved FIRST because "off" may have
         #    to call a different one: on DeepSeek-style servers the reasoning mode
@@ -1939,7 +2336,7 @@ class LLMPromptStudio:
                 result, err = _post_chat(url, payload, api_key, timeout)
             if err:
                 print(err)
-                return _ui_result(err, err, sheet_in)
+                return _ui_result(err, err, sheet_in, error=True)
         except Exception as e:
             # Gone in the middle of the run? A timeout on a server that still
             # answers is a slow generation, not an offline one, and stays an
@@ -1950,7 +2347,7 @@ class LLMPromptStudio:
                                        user_prompt, base_url, why, sheet_in)
             msg = "[LLM ERROR] %s\nURL: %s\n%s" % (e, url, traceback.format_exc())
             print(msg)
-            return _ui_result(msg, msg, sheet_in)
+            return _ui_result(msg, msg, sheet_in, error=True)
 
         # 8) extract the text
         try:
@@ -1966,7 +2363,7 @@ class LLMPromptStudio:
         except Exception:
             msg = "[LLM ERROR] Unexpected response shape:\n" + json.dumps(result)[:2000]
             print(msg)
-            return _ui_result(msg, msg, sheet_in)
+            return _ui_result(msg, msg, sheet_in, error=True)
 
         if finish == "length":
             print("[LLMPromptStudio] the answer was cut at max_tokens (%d); "
@@ -1989,7 +2386,7 @@ class LLMPromptStudio:
                    % why)
             print(msg)
             return _ui_result(msg, raw or reasoning or json.dumps(result)[:2000],
-                              sheet_in)
+                              sheet_in, error=True)
 
         # 8a) story mode: the answer is a sheet and a prompt. Only the prompt
         #    goes down the graph; the sheet goes back to its widget.
@@ -2005,7 +2402,7 @@ class LLMPromptStudio:
                        "it was." % (" (cut at max_tokens = %d)" % int(max_tokens)
                                     if finish == "length" else ""))
                 print(msg)
-                return _ui_result(msg, raw, sheet_in)
+                return _ui_result(msg, raw, sheet_in, error=True)
             cleaned = story_prompt
             if new_sheet:
                 sheet_out = new_sheet
@@ -2053,6 +2450,155 @@ class LLMPromptStudio:
                 _STORY_MEMO[memo_key] = (memo_sig, sheet_out, out)
         return out
 
+
+    # ------------------------------------------------------------ sequence
+    def _generate_sequence(self, active, extra_pnginfo, kw):
+        """One prompt per active video (see the sequence mode notes above).
+
+        Every LLM call goes through _generate_single, so pictures, thinking,
+        loading and retries behave exactly as for one prompt. The calls run
+        under their own id, so they never touch this node's chat history or
+        the prompt kept for the offline fallback.
+        """
+        uid = kw.get("unique_id")
+        user_prompt = kw.get("user_prompt") or ""
+        target = kw.get("target_model") or ""
+        story = (kw.get("story_sheet") or "").strip() if kw.get("story_mode") else ""
+        if kw.get("story_mode"):
+            print("[LLMPromptStudio] sequence mode: story mode is not used, the "
+                  "sequence sheet is the memory")
+
+        sheet_in = _workflow_sheet(extra_pnginfo, uid)
+        if sheet_in is None:
+            sheet_in = _seq_sheets().get(str(uid), "")
+        bible, plan, prompts = _parse_sequence(sheet_in)
+        total = min(MAX_VIDEOS, max([max(active)] + list(plan) + list(prompts)))
+        active = sorted(k for k in active if k <= total)
+        print("[LLMPromptStudio] sequence of %d video(s); writing %s"
+              % (total, ", ".join(map(str, active))))
+
+        def result(texts, raw, preview, ui_extra):
+            res = [texts.get(1, ""), raw, story] + [
+                texts.get(k, "") for k in range(2, MAX_VIDEOS + 1)]
+            ui = {"text": [preview], "sequence_videos": active}
+            ui.update(ui_extra)
+            return {"ui": ui, "result": tuple(res)}
+
+        def typed_text():
+            # The user's own words per video, when they name the videos.
+            parts = _split_by_video(user_prompt)
+            return {k: (parts.get(k, "") if parts else user_prompt)
+                    for k in range(1, MAX_VIDEOS + 1)}
+
+        # LLM switched off: the user's text, cut per video when it names them.
+        if not kw.get("enabled", True):
+            texts = typed_text()
+            head = "⏻ LLM OFF - user_prompt passed through unchanged"
+            return result(texts, user_prompt,
+                          _sequence_preview(head, total, texts, active),
+                          {"llm_disabled": [True]})
+
+        base_url, api_key = kw.get("base_url"), kw.get("api_key") or ""
+        mode = kw.get("on_llm_offline") or OFFLINE_MODES[0]
+
+        def offline(why):
+            _DEGRADED.add(str(uid))
+            head = "[LLM OFFLINE] %s is unreachable (%s)" % (base_url, why)
+            if mode.startswith("stop"):
+                raise RuntimeError(head)
+            if mode.startswith("pass"):
+                texts, note = typed_text(), "user_prompt passed through unchanged"
+            else:
+                missing = [k for k in active if not prompts.get(k)]
+                if missing:
+                    raise RuntimeError(
+                        head + "\nThe sequence sheet has no earlier prompt for "
+                        "video %s to reuse: run it once with the LLM up, or set "
+                        "on_llm_offline to pass the user_prompt through."
+                        % ", ".join(map(str, missing)))
+                texts, note = prompts, "reused the prompts of the sequence sheet"
+            msg = "%s - %s" % (head, note)
+            print(msg)
+            return result(texts, msg,
+                          _sequence_preview("⚠ LLM OFFLINE - " + note, total,
+                                            texts, active),
+                          {"llm_offline": [msg]})
+
+        up, why = _server_reachable(base_url, api_key)
+        if not up:
+            return offline(why)
+
+        sub = dict(kw)
+        sub.update(story_mode=False, keep_history=False, reset_history=False,
+                   unique_id="%s#sequence" % uid, enabled=True,
+                   on_llm_offline="stop with an error", unload_after=False)
+
+        def ask(what, **over):
+            call = dict(sub)
+            call.update(over)
+            try:
+                out = self._generate_single(**call)
+            except RuntimeError as e:
+                if "[LLM OFFLINE]" in str(e):
+                    return None, None
+                raise
+            text, raw = out["result"][0], out["result"][1]
+            if out["ui"].get("llm_error"):
+                raise RuntimeError("[LLM ERROR] Sequence mode, %s:\n%s" % (what, text))
+            return text, raw
+
+        raws = []
+        # 1) the plan: only when there is none yet, or the request changed.
+        sig = json.dumps([user_prompt, target, kw.get("system_prompt"),
+                          kw.get("global_directives"), kw.get("reference_map"),
+                          total], default=str)
+        if (not bible or any(k not in plan for k in range(1, total + 1))
+                or _SEQ_PLANNED.get(str(uid)) != sig):
+            text, raw = ask("the plan",
+                            system_prompt="You plan a sequence of videos for %s."
+                                          % target,
+                            _tail=_plan_block(total, target, bible, plan))
+            if text is None:
+                return offline("gone in the middle of the run")
+            new_bible, new_plan, _ = _parse_sequence(text)
+            if not new_plan:
+                raise RuntimeError(
+                    "[LLM ERROR] Sequence mode: the plan came back without its "
+                    "[PLAN] part. Raise max_tokens (the plan of every video is "
+                    "written from it) or lower the thinking level.\n\n" + raw)
+            bible = new_bible or bible
+            plan.update(new_plan)
+            _SEQ_PLANNED[str(uid)] = sig
+            raws.append("[PLAN]\n" + raw)
+
+        # 2) one call per active video, in order, so each one starts from the
+        #    prompt just written before it.
+        for i, k in enumerate(active):
+            prev = prompts.get(k - 1)
+            nxt = prompts.get(k + 1) if (k + 1) not in active else None
+            line = plan.get(k) or ("(the plan has no line for this video: "
+                                   "continue the story naturally)")
+            over = {"user_prompt": "Write the prompt for VIDEO %d: %s" % (k, line),
+                    "_tail": _write_block(k, total, bible, plan, prev, nxt,
+                                          user_prompt)}
+            if i == len(active) - 1:
+                over["unload_after"] = kw.get("unload_after", False)
+            text, raw = ask("video %d" % k, **over)
+            if text is None:
+                return offline("gone in the middle of the run")
+            prompts[k] = _clean_video_prompt(text, k)
+            raws.append("[VIDEO %d]\n%s" % (k, raw))
+
+        sheet = _build_sequence(bible, plan, prompts)
+        _remember_sheet(uid, sheet)
+        _DEGRADED.discard(str(uid))
+        kept = [k for k in range(1, total + 1) if k not in active]
+        head = "🎬 Sequence of %d videos - written now: %s%s" % (
+            total, ", ".join(map(str, active)),
+            " - kept: " + ", ".join(map(str, kept)) if kept else "")
+        return result(prompts, "\n\n".join(raws),
+                      _sequence_preview(head, total, prompts, active),
+                      {"sequence_sheet": [sheet]})
 
 # Settings one rarely touches, folded away on the node (INPUT_TYPES).
 _FOLDED = (

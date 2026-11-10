@@ -501,6 +501,135 @@ function syncPictureSlots(node) {
     }
 }
 
+// ---------------------------------------------------------- sequence outputs
+// The backend declares prompt_2 .. prompt_16 after the three historical outputs
+// (nodes.py, MAX_VIDEOS). Like the picture sockets, they are shown one at a
+// time: every wired one, plus ONE free one after the last wired. Only the end
+// of the list is ever trimmed or grown, so each output keeps the position the
+// backend gives it - a wire belongs to a position. Wiring prompt_2 or above to
+// a node that runs is what turns sequence mode on (the backend checks it).
+const MAX_VIDEOS = 16;
+const VIDEO_RE = /^prompt_(\d+)$/;
+
+function videoIndex(name) {
+    if (name === "prompt") return 1;
+    const m = VIDEO_RE.exec(name || "");
+    return m ? parseInt(m[1], 10) : 0;
+}
+
+function outputWired(out) {
+    return Array.isArray(out?.links) && out.links.length > 0;
+}
+
+function syncPromptOutputs(node) {
+    try {
+        if (!Array.isArray(node.outputs)) return;
+        let wired = 1;
+        for (const out of node.outputs) {
+            const n = videoIndex(out.name);
+            if (n >= 2 && outputWired(out)) wired = Math.max(wired, n);
+        }
+        const want = Math.min(MAX_VIDEOS, wired + 1);
+        for (let i = node.outputs.length - 1; i >= 3; i--) {
+            const out = node.outputs[i];
+            if (videoIndex(out.name) <= want || outputWired(out)) break;
+            node.removeOutput(i);
+        }
+        let highest = 1;
+        for (const out of node.outputs) highest = Math.max(highest, videoIndex(out.name));
+        for (let n = highest + 1; n <= want; n++) {
+            node.addOutput("prompt_" + n, "STRING", {
+                tooltip: "Sequence: the prompt of video " + n + ". Wire it to " +
+                    "turn sequence mode on - one prompt per wired video.",
+            });
+        }
+        app.graph?.setDirtyCanvas(true, true);
+    } catch (e) {
+        console.warn("[coco] could not grow the prompt outputs:", e);
+    }
+}
+
+function getLink(id) {
+    const links = app.graph?.links;
+    if (!links) return null;
+    return links instanceof Map ? links.get(id) : links[id];
+}
+
+// Mode 2 = muted (Ctrl+M), 4 = bypassed (Ctrl+B). Only the node at the end of
+// the wire is looked at here; the backend follows the whole branch.
+function liveVideos(node) {
+    const live = [];
+    for (const out of node.outputs || []) {
+        const n = videoIndex(out.name);
+        if (!n || !outputWired(out)) continue;
+        const on = out.links.some((id) => {
+            const target = app.graph?.getNodeById(getLink(id)?.target_id);
+            return target && target.mode !== 2 && target.mode !== 4;
+        });
+        if (on) live.push(n);
+    }
+    return live.sort((a, b) => a - b);
+}
+
+function inSequence(node) {
+    return (node.outputs || []).some((o) => videoIndex(o.name) >= 2 && outputWired(o));
+}
+
+// The sequence sheet: bible, plan and every prompt of the sequence. It lives
+// in node.properties - saved with the workflow, read by the backend from the
+// workflow ComfyUI hands it - and NOT in a widget: a widget is an input, and an
+// input changing after every run would make ComfyUI render every video again
+// on the next queue. The box only shows it and lets it be edited.
+function setSequenceSheet(node, text) {
+    if (!node.properties) node.properties = {};
+    node.properties.cocoSequence = String(text ?? "");
+    const w = getWidget(node, "sequence_sheet");
+    if (w && w.value !== node.properties.cocoSequence) w.value = node.properties.cocoSequence;
+    app.graph?.setDirtyCanvas(true, true);
+}
+
+function sequenceLabel(node) {
+    const live = liveVideos(node).length;
+    return "🆕 New sequence (empty the sheet) · " + live + " video" +
+        (live === 1 ? "" : "s") + " wired";
+}
+
+function buildSequence(node) {
+    const box = ComfyWidgets["STRING"](
+        node, "sequence_sheet", ["STRING", { multiline: true }], app).widget;
+    dontSerialize(box);
+    const el = box.element || box.inputEl;
+    if (el) {
+        el.placeholder = "Sequence sheet - written by the node: the bible " +
+            "(characters, places, style), the plan of each video and every " +
+            "prompt. Edit it to fix something; empty it to start a new sequence.";
+        el.addEventListener("input", () => {
+            if (!node.properties) node.properties = {};
+            node.properties.cocoSequence = el.value;
+        });
+    }
+    const btn = dontSerialize(node.addWidget("button", sequenceLabel(node), null,
+        () => setSequenceSheet(node, "")));
+    node._cocoSeqBtn = btn;
+    const apply = (resize) => {
+        const on = inSequence(node);
+        const changed = box.hidden === on || btn.hidden === on;
+        box.hidden = !on;
+        btn.hidden = !on;
+        if (resize && changed) {
+            const need = node.computeSize()[1];
+            node.setSize([node.size[0], on ? Math.max(node.size[1], need) : need]);
+        }
+        app.graph?.setDirtyCanvas(true, true);
+    };
+    node._cocoApplySequence = (resize = true) => {
+        const saved = node.properties?.cocoSequence;
+        if (typeof saved === "string" && box.value !== saved) box.value = saved;
+        apply(resize);
+    };
+    apply(false);
+}
+
 // ------------------------------------------------------ reopening a workflow
 // A saved node lists its inputs in the order they had on screen, and each link
 // says which POSITION it lands on. On load, the frontend rebuilds the inputs in
@@ -723,6 +852,7 @@ app.registerExtension({
                     })),
             ];
             foldStory(node, storyBtns);
+            buildSequence(node);
 
             // Auto-load the matching preset into the system prompt box on change.
             const tw = getWidget(node, "target_model");
@@ -755,6 +885,8 @@ app.registerExtension({
                 // mode in another state than the default.
                 node._cocoApplyFold?.();
                 node._cocoApplyStory?.();
+                syncPromptOutputs(node);
+                node._cocoApplySequence?.(false);
             }, 250);
 
             return ret;
@@ -772,6 +904,14 @@ app.registerExtension({
                 const node = this;
                 setTimeout(() => syncPictureSlots(node), 0);
             }
+            // LiteGraph.OUTPUT === 2: a prompt_N wired or unwired.
+            if (type === 2 && !app.configuringGraph) {
+                const node = this;
+                setTimeout(() => {
+                    syncPromptOutputs(node);
+                    node._cocoApplySequence?.();
+                }, 0);
+            }
             return r;
         };
 
@@ -781,7 +921,11 @@ app.registerExtension({
         nodeType.prototype.onConfigure = function () {
             const r = onConfigure?.apply(this, arguments);
             const node = this;
-            setTimeout(() => syncPictureSlots(node), 300);
+            setTimeout(() => {
+                syncPictureSlots(node);
+                syncPromptOutputs(node);
+                node._cocoApplySequence?.(false);
+            }, 300);
             return r;
         };
 
@@ -790,6 +934,11 @@ app.registerExtension({
         nodeType.prototype.onDrawForeground = function (ctx) {
             const r = onDrawForeground?.apply(this, arguments);
             if (this.flags?.collapsed) return r;
+            const seqBtn = this._cocoSeqBtn;
+            if (seqBtn && !seqBtn.hidden) {
+                const label = sequenceLabel(this);
+                if (seqBtn.name !== label) seqBtn.name = label;
+            }
             const h = globalThis.LiteGraph?.NODE_TITLE_HEIGHT || 30;
             ctx.save();
             ctx.beginPath();
@@ -825,6 +974,9 @@ app.registerExtension({
                 setStorySheet(node, join(message.story_sheet));
             }
             if (message?.story_note) toast("warn", "Story mode", join(message.story_note));
+            if (message?.sequence_sheet !== undefined) {
+                setSequenceSheet(node, join(message.sequence_sheet));
+            }
             const text = message?.text;
             if (text === undefined || text === null) return;
             const value = Array.isArray(text) ? text.join("") : String(text);

@@ -24,3 +24,5 @@ Thumbs.db
 # Last prompt of each node, kept for when the LLM is offline
 last_prompts.json
 last_prompts.json.tmp
+sequences.json
+sequences.json.tmp
