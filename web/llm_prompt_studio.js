@@ -613,9 +613,13 @@ function buildSequence(node) {
     node._cocoSeqBtn = btn;
     const apply = (resize) => {
         const on = inSequence(node);
-        const changed = box.hidden === on || btn.hidden === on;
+        // rewrite_videos only means something in sequence mode.
+        const pick = getWidget(node, "rewrite_videos");
+        const changed = box.hidden === on || btn.hidden === on ||
+            (pick && pick.hidden === on);
         box.hidden = !on;
         btn.hidden = !on;
+        if (pick) pick.hidden = !on;
         if (resize && changed) {
             const need = node.computeSize()[1];
             node.setSize([node.size[0], on ? Math.max(node.size[1], need) : need]);

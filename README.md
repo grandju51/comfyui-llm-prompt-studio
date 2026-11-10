@@ -127,12 +127,17 @@ wire into the music model's two separate inputs), plus a generic preset.
   order, from the bible, the plan and the prompt before it, so the clips stay
   consistent. All of it is kept in the **sequence sheet** on the node: saved
   with the workflow, editable by hand, emptied by **🆕 New sequence**.
-  To **redo one video**, bypass the others and queue with a new seed: only
-  that prompt is rewritten (from the prompts around it), the others are kept
-  word for word, and `prompt_3` always stays video 3.
-  With the LLM switched off, the text is cut on "video 1 / video 2...": what
-  comes before video 1 and a sentence about every video ("9 seconds per
-  video") go into each one. Each prompt is written out of `max_tokens`: a clip
+  To **redo one video**, put its number in `rewrite_videos` (`2`, `2,3`,
+  `2-4`; empty = every wired video) and queue with a new seed, or bypass the
+  other videos: only that prompt is rewritten (from the prompts around it),
+  the others are kept word for word, and `prompt_3` always stays video 3.
+  With the LLM switched **off**, each video gets its prompt from the sheet, so
+  you can redo windows or clips as often as you like without calling the LLM
+  or losing a prompt. A video with no prompt in the sheet yet gets your text,
+  cut on "video 1 / video 2...": what comes before video 1 and a sentence
+  about every video ("9 seconds per video") go into each one. After editing
+  the sheet by hand, queue with a new seed so the node runs again (the sheet
+  is not an input). Each prompt is written out of `max_tokens`: a clip
   with several shots needs more than a single image prompt. With only `prompt`
   wired, the node works as before.
 - **Conversation memory**: `keep_history` for multi-turn chat,

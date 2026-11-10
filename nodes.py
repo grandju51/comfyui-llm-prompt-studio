@@ -1200,6 +1200,16 @@ _TRAILING_GLUE = re.compile(
     r"(?i)[\s,;]*(?:\b(?:dans|in|la|le|the|et|and|puis|then|de|du|pour|for)\b[\s,;]*)+$")
 
 
+def _video_list(text) -> set:
+    """"2, 3" / "2-4" / "2 3" -> {2, 3, 4}. Empty or unreadable -> empty."""
+    out = set()
+    for a, b in re.findall(r"(\d+)(?:\s*-\s*(\d+))?", str(text or "")):
+        lo, hi = int(a), int(b or a)
+        out.update(k for k in range(min(lo, hi), max(lo, hi) + 1)
+                   if 1 <= k <= MAX_VIDEOS)
+    return out
+
+
 # A sentence about every video ("9 secondes par vidéo") is not part of the
 # video it happens to follow.
 _EVERY_VIDEO = re.compile(
@@ -2072,11 +2082,19 @@ class LLMPromptStudio:
         # Last of all, so it is the last widget: widgets_values is positional,
         # and optional with a default, so an API prompt without it still runs.
         spec["optional"]["enabled"] = ("BOOLEAN", {"default": True,
-            "label_on": "LLM: on", "label_off": "LLM: off - user_prompt passed through",
+            "label_on": "LLM: on", "label_off": "LLM: off - no LLM call",
             "tooltip": "Off: the LLM is never called, and user_prompt goes out "
                        "unchanged as prompt and raw_response (story_sheet as it "
-                       "is). Unlike Ctrl+B, it outputs your text, and it can be "
-                       "set from the API."})
+                       "is). In sequence mode, each video gets the prompt of the "
+                       "sequence sheet instead, and your text only when the sheet "
+                       "has none for it. Unlike Ctrl+B, it outputs text, and it "
+                       "can be set from the API."})
+        spec["optional"]["rewrite_videos"] = ("STRING", {"default": "",
+            "multiline": False,
+            "tooltip": "Sequence mode: which videos the LLM rewrites, e.g. \"2\" "
+                       "or \"2,3\" or \"2-4\". Empty = every wired video. The "
+                       "others keep the prompt of the sequence sheet, word for "
+                       "word."})
         return spec
 
     # Always re-run when the seed changes (control_after_generate); fixed seed = cached.
@@ -2490,13 +2508,34 @@ class LLMPromptStudio:
             return {k: (parts.get(k, "") if parts else user_prompt)
                     for k in range(1, MAX_VIDEOS + 1)}
 
-        # LLM switched off: the user's text, cut per video when it names them.
+        # LLM switched off: the prompts of the sheet, so the windows / clips
+        # can be redone without the LLM; the user's text (cut per video when it
+        # names them) only for a video the sheet has no prompt for yet.
         if not kw.get("enabled", True):
-            texts = typed_text()
-            head = "⏻ LLM OFF - user_prompt passed through unchanged"
+            typed = typed_text()
+            texts = {k: prompts.get(k) or typed.get(k, "")
+                     for k in range(1, MAX_VIDEOS + 1)}
+            mine = [k for k in range(1, total + 1) if not prompts.get(k)]
+            head = "⏻ LLM OFF - prompts of the sequence sheet" + (
+                " (your text for video %s)" % ", ".join(map(str, mine))
+                if mine else "")
             return result(texts, user_prompt,
-                          _sequence_preview(head, total, texts, active),
+                          _sequence_preview(head, total, texts, []),
                           {"llm_disabled": [True]})
+
+        # Only some videos rewritten: the others come from the sheet. A video
+        # with no prompt in the sheet yet is written anyway, or it would be
+        # sent out empty.
+        wanted = _video_list(kw.get("rewrite_videos"))
+        if wanted:
+            active = [k for k in active if k in wanted or not prompts.get(k)]
+            if not active:
+                head = ("🎬 Sequence of %d videos - nothing rewritten: "
+                        "rewrite_videos (%s) names no wired video"
+                        % (total, kw.get("rewrite_videos")))
+                print("[LLMPromptStudio] " + head)
+                return result(prompts, head,
+                              _sequence_preview(head, total, prompts, []), {})
 
         base_url, api_key = kw.get("base_url"), kw.get("api_key") or ""
         mode = kw.get("on_llm_offline") or OFFLINE_MODES[0]
