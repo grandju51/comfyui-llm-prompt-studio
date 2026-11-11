@@ -7,6 +7,8 @@ specific image / video generator**.
 It ships with editable, ready-to-use prompt "cards" for:
 **Anima base v1**, **Illustrious**, **SDXL**,
 **Qwen-Image 2.1** (two cards: *text to image* and *edit / i2i*),
+**MiniMax H3 Image** (two cards: *text to image* and *edit*, MiniMax's own
+prompts),
 **FLUX.2 Klein (9B)**,
 **Krea 2 (Krea AI)**, **Ideogram**, **LTX-2 / LTX 2.3**, **Wan 2.2**,
 **MiniMax H3 / Hailuo 3** (one card per base task — *text to video*, *first
@@ -710,6 +712,23 @@ servers whose model names don't contain "deepseek".
   consistency (*"if descriptions in Caption and Lyrics contradict, the model
   gets confused"*): the lyrics cards only name an instrument the brief itself
   named, since the two runs cannot see each other.
+- MiniMax H3 Image — MiniMax's **own prompts** for the model
+  (`prompt/t2i/task_prompt.txt` and `prompt/edit/task_prompt.txt`, published in
+  [MiniMaxAI/MiniMax-H3-Image-PE](https://huggingface.co/MiniMaxAI/MiniMax-H3-Image-PE)).
+  They run on your own LLM: the PE model of that repository is **not** needed.
+  The model expects a detailed English description of the whole image, and the
+  MiniMax API runs these prompts on every request before generating. Both cards
+  keep them word for word, except for the answer: the originals return a JSON
+  object with the caption and an aspect ratio, while here the caption is the
+  prompt and the image size is set in ComfyUI. The **text to image** card
+  writes one English paragraph (exact on-image text in quotes, body orientation
+  stated against the camera, information design for posters, charts and
+  cards). The **edit** card writes MiniMax's three-part edit description: each
+  kept element defined as `<Subject N>` from its `<Picture N>`, a `The target
+  image...` overview with one relationship per Subject (fully preserved,
+  partially preserved, attribute transfer, weak reference), then only what
+  changes or is new. `<Picture 1>` is `image_1` of ComfyUI's MiniMax H3 Image
+  Conditioning, the picture to edit.
 - MiniMax H3 / Hailuo 3 — the **two official prompt-writing guides** shipped
   with the model
   ([MiniMaxAI/MiniMax-H3 → docs](https://huggingface.co/MiniMaxAI/MiniMax-H3/tree/main/docs)):
