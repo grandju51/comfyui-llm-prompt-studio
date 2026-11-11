@@ -303,6 +303,8 @@ wire into the music model's two separate inputs), plus a generic preset.
   story, teal pictures / audio / video, pink sequence mode - and the LLM switch
   is red. Colour only: the order of the settings never changes, so saved
   workflows keep their values. Classic canvas only (Nodes 2.0 draws its own).
+  To turn the group colours off, untick **Settings → coco (LLM Prompt Studio)
+  → Colour the settings by group**: only the red switch stays.
 
 Outputs:
 - `prompt` – the cleaned text (after the cut tag, **no thinking**). It is a

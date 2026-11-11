@@ -681,21 +681,45 @@ function tint(rgb, amount) {
     return `rgb(${mix.join(",")})`;
 }
 
-function tintWidget(w) {
+// ComfyUI setting: the group colours can be turned off; the red LLM switch
+// always stays.
+const COLOURS_SETTING = "LLMPromptStudio.ColourGroups";
+
+function groupColoursOn() {
+    try {
+        const v = app.extensionManager?.setting?.get?.(COLOURS_SETTING) ??
+            app.ui?.settings?.getSettingValue?.(COLOURS_SETTING);
+        return v !== false;
+    } catch (e) {
+        return true;
+    }
+}
+
+function tintWidget(w, coloursOn) {
     const group = w._cocoGroup || GROUP_OF[w.name];
-    if (!group || w._cocoTinted === group) return;
-    w._cocoTinted = group;
-    const rgb = GROUPS[group];
+    if (!group) return;
     const strong = group === "switch";
+    const on = strong || coloursOn;
+    const state = group + (on ? ":on" : ":off");
+    if (w._cocoTinted === state) return;
+    w._cocoTinted = state;
+    const rgb = GROUPS[group];
     const el = w.element || w.inputEl;
     if (el?.style) {
         // A multiline box is an HTML element over the canvas.
-        el.style.backgroundColor =
-            `color-mix(in srgb, rgb(${rgb.join(",")}) 14%, var(--comfy-input-bg, #222))`;
-        el.style.borderLeft = `3px solid rgb(${rgb.join(",")})`;
+        el.style.backgroundColor = on
+            ? `color-mix(in srgb, rgb(${rgb.join(",")}) 14%, var(--comfy-input-bg, #222))`
+            : "";
+        el.style.borderLeft = on ? `3px solid rgb(${rgb.join(",")})` : "";
         return;
     }
     try {
+        if (!on) {
+            // Back to the frontend's own look.
+            delete w.background_color;
+            delete w.getOutlineColor;
+            return;
+        }
         Object.defineProperty(w, "background_color", {
             configurable: true,
             get: () => tint(rgb, strong ? 0.6 : 0.2),
@@ -707,7 +731,8 @@ function tintWidget(w) {
 
 function tintWidgets(node) {
     if (globalThis.LiteGraph?.vueNodesMode) return;
-    for (const w of node.widgets || []) tintWidget(w);
+    const coloursOn = groupColoursOn();
+    for (const w of node.widgets || []) tintWidget(w, coloursOn);
 }
 
 // ------------------------------------------------------ reopening a workflow
@@ -801,6 +826,16 @@ function realignWorkflow(graphData) {
 
 app.registerExtension({
     name: "comfy.LLMPromptStudio",
+    settings: [{
+        id: COLOURS_SETTING,
+        category: ["coco (LLM Prompt Studio)", "Look", "Colour groups"],
+        name: "Colour the settings by group",
+        tooltip: "Off: the settings keep ComfyUI's own colours; only the red " +
+            "LLM on/off switch stays.",
+        type: "boolean",
+        defaultValue: true,
+        onChange: () => app.graph?.setDirtyCanvas(true, true),
+    }],
     async setup() {
         startStatusPolling();
         await loadTemplates();
