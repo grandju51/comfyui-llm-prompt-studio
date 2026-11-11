@@ -9,6 +9,7 @@ It ships with editable, ready-to-use prompt "cards" for:
 **Qwen-Image 2.1** (two cards: *text to image* and *edit / i2i*),
 **MiniMax H3 Image** (two cards: *text to image* and *edit*, MiniMax's own
 prompts),
+**MOSS-Image** (*text to image*),
 **FLUX.2 Klein (9B)**,
 **Krea 2 (Krea AI)**, **Ideogram**, **LTX-2 / LTX 2.3**, **Wan 2.2**,
 **MiniMax H3 / Hailuo 3** (one card per base task — *text to video*, *first
@@ -729,6 +730,18 @@ servers whose model names don't contain "deepseek".
   partially preserved, attribute transfer, weak reference), then only what
   changes or is new. `<Picture 1>` is `image_1` of ComfyUI's MiniMax H3 Image
   Conditioning, the picture to edit.
+- MOSS-Image — the **text to image** card follows the official
+  [prompt-enhancer skill](https://github.com/OpenMOSS/MOSS-Image/blob/main/skills/moss-image-prompt-enhancer/SKILL.md),
+  the [user guide](https://github.com/OpenMOSS/MOSS-Image/blob/main/USERGUIDE.md)
+  and the upsampler prompt of ComfyUI's MOSS-Image template (written from that
+  skill): the finished picture described as it looks, never an instruction;
+  eight facets (subject, action, space, setting, framing, light, tone, text);
+  on-image text verbatim in double quotes, with real line breaks where they
+  matter; no quality tag soup and no sizes in the caption. Tags only when you
+  ask for them, in the official order (quality, score, meta, year, character,
+  series, artist, general). Layout prompts stay with ComfyUI's **MOSS-Image
+  Layout Prompt** node: the skill does not let the LLM compute the model's
+  coordinates.
 - MiniMax H3 / Hailuo 3 — the **two official prompt-writing guides** shipped
   with the model
   ([MiniMaxAI/MiniMax-H3 → docs](https://huggingface.co/MiniMaxAI/MiniMax-H3/tree/main/docs)):
